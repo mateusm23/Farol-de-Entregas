@@ -75,7 +75,7 @@
     // ═══════════════════════════════════════════════════════
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js';
     import {
-      getFirestore, doc, setDoc, deleteDoc, addDoc,
+      getFirestore, doc, getDoc, setDoc, deleteDoc, addDoc,
       onSnapshot, collection, query, orderBy, limit, getDocs, writeBatch
     } from 'https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js';
 
@@ -306,7 +306,15 @@
       unsubPeriods = onSnapshot(collection(db, 'periods'), snap => {
         S.periods = snap.docs.map(d => d.data())
           .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
-        if (!S.currentPeriodId && S.periods.length > 0) S.currentPeriodId = S.periods[0].id;
+        const visible = S.periods.filter(p => !p.hidden);
+        if (!S.currentPeriodId) {
+          S.currentPeriodId = (visible[0] ?? S.periods[0])?.id ?? null;
+        } else {
+          const cur = S.periods.find(p => p.id === S.currentPeriodId);
+          if (cur?.hidden && !S.isEditor) {
+            S.currentPeriodId = visible[0]?.id ?? null;
+          }
+        }
         S.period = S.periods.find(p => p.id === S.currentPeriodId) ?? null;
         renderIfReady();
         refreshSnapshots();
@@ -1435,21 +1443,19 @@
 
     // migrações pontuais
     (async () => {
-      const { getDoc, getDocs: _gd } = await import('https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js');
-
       // renomeia FAROL ATIV. → FAROL CONT.
-      const d14 = doc(db, 'deliveries', 'd14');
-      const snapD14 = await getDoc(d14);
-      if (snapD14.exists() && snapD14.data().name === 'FAROL ATIV.') {
-        await setDoc(d14, { ...snapD14.data(), name: 'FAROL CONT.', full: 'Gestão à Vista — Farol de Controle' });
+      const d14Ref = doc(db, 'deliveries', 'd14');
+      const d14Snap = await getDoc(d14Ref);
+      if (d14Snap.exists() && d14Snap.data().name === 'FAROL ATIV.') {
+        await setDoc(d14Ref, { ...d14Snap.data(), name: 'FAROL CONT.', full: 'Gestão à Vista — Farol de Controle' });
       }
 
       // oculta período "Junho 2025"
-      const periodsSnap = await _gd(collection(db, 'periods'));
-      for (const d of periodsSnap.docs) {
-        const data = d.data();
+      const periodsSnap = await getDocs(collection(db, 'periods'));
+      for (const snap of periodsSnap.docs) {
+        const data = snap.data();
         if (data.name === 'Junho 2025' && !data.hidden) {
-          await setDoc(doc(db, 'periods', d.id), { ...data, hidden: true });
+          await setDoc(doc(db, 'periods', snap.id), { ...data, hidden: true });
         }
       }
     })();
