@@ -142,7 +142,7 @@
       { id:'d11', kr:'KR2', name:'REL. SST',       full:'Relatório SST',                     order:11 },
       { id:'d12', kr:'KR2', name:'CHECKLIST 360',  full:'Checklist 360',                     order:12 },
       { id:'d13', kr:'KR2', name:'LINHA BALANÇO',  full:'Gestão à Vista — Linha de Balanço', order:13 },
-      { id:'d14', kr:'KR2', name:'FAROL ATIV.',    full:'Gestão à Vista — Farol de Ativ.',   order:14 },
+      { id:'d14', kr:'KR2', name:'FAROL CONT.',    full:'Gestão à Vista — Farol de Controle', order:14 },
       { id:'d15', kr:'KR2', name:'PROG. SEMANAL',  full:'Gestão à Vista — Prog. Semanal',    order:15 },
     ];
 
@@ -499,7 +499,12 @@
               </div>
             </div>
             <div class="px-6 py-4 border-t border-slate-100 flex items-center justify-between">
-              ${!isNew?`<button onclick="window._deletePeriod('${p.id}')" class="text-xs text-rose-500 hover:text-rose-700 font-medium">Excluir período</button>`:'<span></span>'}
+              ${!isNew?`
+                <div class="flex items-center gap-3">
+                  <button onclick="window._toggleHidePeriod('${p.id}',${!!p.hidden})" class="text-xs font-medium ${p.hidden?'text-blue-500 hover:text-blue-700':'text-slate-400 hover:text-slate-600'}">${p.hidden?'👁 Reativar período':'🙈 Ocultar período'}</button>
+                  <button onclick="window._deletePeriod('${p.id}')" class="text-xs text-rose-500 hover:text-rose-700 font-medium">Excluir período</button>
+                </div>
+              `:'<span></span>'}
               <div class="flex gap-2">
                 <button onclick="closeModal()" class="px-5 py-2.5 text-sm border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50">Cancelar</button>
                 <button onclick="window._savePeriod('${p.id}')" class="px-5 py-2.5 text-sm bg-slate-900 hover:bg-blue-600 text-white rounded-xl font-semibold transition-colors shadow-lg">Salvar período</button>
@@ -527,6 +532,12 @@
       window._deletePeriod = async id => {
         if (!confirm('Excluir período?')) return;
         await deleteDoc(doc(db,'periods',id)); closeModal();
+      };
+      window._toggleHidePeriod = async (id, isHidden) => {
+        const period = S.periods.find(p => p.id === id);
+        if (!period) return;
+        await setDoc(doc(db,'periods',id), { ...period, hidden: !isHidden });
+        closeModal();
       };
     }
 
@@ -904,9 +915,9 @@
             </div>
 
             <div class="flex flex-wrap items-center gap-2">
-              ${S.periods.length > 0 ? `
+              ${S.periods.filter(p => S.isEditor || !p.hidden).length > 0 ? `
                 <select id="period-sel" class="bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 shadow-sm outline-none focus:border-blue-500 cursor-pointer">
-                  ${S.periods.map(p=>`<option value="${p.id}" ${p.id===S.currentPeriodId?'selected':''}>${p.name}</option>`).join('')}
+                  ${S.periods.filter(p => S.isEditor || !p.hidden).map(p=>`<option value="${p.id}" ${p.id===S.currentPeriodId?'selected':''}>${p.name}${p.hidden?' (oculto)':''}</option>`).join('')}
                 </select>
               ` : ''}
 
@@ -1421,6 +1432,28 @@
     // ═══════════════════════════════════════════════════════
     initEditor();
     await seedIfEmpty();
+
+    // migrações pontuais
+    (async () => {
+      const { getDoc, getDocs: _gd } = await import('https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js');
+
+      // renomeia FAROL ATIV. → FAROL CONT.
+      const d14 = doc(db, 'deliveries', 'd14');
+      const snapD14 = await getDoc(d14);
+      if (snapD14.exists() && snapD14.data().name === 'FAROL ATIV.') {
+        await setDoc(d14, { ...snapD14.data(), name: 'FAROL CONT.', full: 'Gestão à Vista — Farol de Controle' });
+      }
+
+      // oculta período "Junho 2025"
+      const periodsSnap = await _gd(collection(db, 'periods'));
+      for (const d of periodsSnap.docs) {
+        const data = d.data();
+        if (data.name === 'Junho 2025' && !data.hidden) {
+          await setDoc(doc(db, 'periods', d.id), { ...data, hidden: true });
+        }
+      }
+    })();
+
     startListeners();
     setTimeout(scheduleDailySnapshot, 8000);
   </script>
