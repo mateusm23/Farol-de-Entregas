@@ -306,14 +306,11 @@
       unsubPeriods = onSnapshot(collection(db, 'periods'), snap => {
         S.periods = snap.docs.map(d => d.data())
           .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
-        const visible = S.periods.filter(p => !p.hidden);
-        if (!S.currentPeriodId) {
-          S.currentPeriodId = (visible[0] ?? S.periods[0])?.id ?? null;
-        } else {
-          const cur = S.periods.find(p => p.id === S.currentPeriodId);
-          if (cur?.hidden && !S.isEditor) {
-            S.currentPeriodId = visible[0]?.id ?? null;
-          }
+        const primary = S.periods.find(p => p.isPrimary);
+        if (!S.isEditor) {
+          S.currentPeriodId = primary?.id ?? S.periods[0]?.id ?? null;
+        } else if (!S.currentPeriodId) {
+          S.currentPeriodId = primary?.id ?? S.periods[0]?.id ?? null;
         }
         S.period = S.periods.find(p => p.id === S.currentPeriodId) ?? null;
         renderIfReady();
@@ -509,7 +506,10 @@
             <div class="px-6 py-4 border-t border-slate-100 flex items-center justify-between">
               ${!isNew?`
                 <div class="flex items-center gap-3">
-                  <button onclick="window._toggleHidePeriod('${p.id}',${!!p.hidden})" class="text-xs font-medium ${p.hidden?'text-blue-500 hover:text-blue-700':'text-slate-400 hover:text-slate-600'}">${p.hidden?'👁 Reativar período':'🙈 Ocultar período'}</button>
+                  ${p.isPrimary
+                    ? `<span class="text-xs font-bold text-amber-600 flex items-center gap-1">⭐ Período principal</span>`
+                    : `<button onclick="window._setPrimary('${p.id}')" class="text-xs font-medium text-slate-500 hover:text-amber-600 transition-colors">⭐ Tornar principal</button>`
+                  }
                   <button onclick="window._deletePeriod('${p.id}')" class="text-xs text-rose-500 hover:text-rose-700 font-medium">Excluir período</button>
                 </div>
               `:'<span></span>'}
@@ -541,10 +541,12 @@
         if (!confirm('Excluir período?')) return;
         await deleteDoc(doc(db,'periods',id)); closeModal();
       };
-      window._toggleHidePeriod = async (id, isHidden) => {
-        const period = S.periods.find(p => p.id === id);
-        if (!period) return;
-        await setDoc(doc(db,'periods',id), { ...period, hidden: !isHidden });
+      window._setPrimary = async id => {
+        const batch = writeBatch(db);
+        S.periods.forEach(p => {
+          batch.set(doc(db,'periods',p.id), { ...p, isPrimary: p.id === id });
+        });
+        await batch.commit();
         closeModal();
       };
     }
@@ -923,10 +925,12 @@
             </div>
 
             <div class="flex flex-wrap items-center gap-2">
-              ${S.periods.filter(p => S.isEditor || !p.hidden).length > 0 ? `
+              ${S.isEditor && S.periods.length > 0 ? `
                 <select id="period-sel" class="bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 shadow-sm outline-none focus:border-blue-500 cursor-pointer">
-                  ${S.periods.filter(p => S.isEditor || !p.hidden).map(p=>`<option value="${p.id}" ${p.id===S.currentPeriodId?'selected':''}>${p.name}${p.hidden?' (oculto)':''}</option>`).join('')}
+                  ${S.periods.map(p=>`<option value="${p.id}" ${p.id===S.currentPeriodId?'selected':''}>${p.isPrimary?'⭐ ':''}${p.name}</option>`).join('')}
                 </select>
+              ` : S.period ? `
+                <span class="bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 shadow-sm">${S.period.name}</span>
               ` : ''}
 
               ${S.isEditor ? `
@@ -1441,22 +1445,12 @@
     initEditor();
     await seedIfEmpty();
 
-    // migrações pontuais
+    // migração pontual: renomeia FAROL ATIV. → FAROL CONT.
     (async () => {
-      // renomeia FAROL ATIV. → FAROL CONT.
       const d14Ref = doc(db, 'deliveries', 'd14');
       const d14Snap = await getDoc(d14Ref);
       if (d14Snap.exists() && d14Snap.data().name === 'FAROL ATIV.') {
         await setDoc(d14Ref, { ...d14Snap.data(), name: 'FAROL CONT.', full: 'Gestão à Vista — Farol de Controle' });
-      }
-
-      // oculta período "Junho 2025"
-      const periodsSnap = await getDocs(collection(db, 'periods'));
-      for (const snap of periodsSnap.docs) {
-        const data = snap.data();
-        if (data.name === 'Junho 2025' && !data.hidden) {
-          await setDoc(doc(db, 'periods', snap.id), { ...data, hidden: true });
-        }
       }
     })();
 
