@@ -164,6 +164,8 @@
       isEditor:        false,
       sectorFilter:    'All',
       showLateOnly:    false,
+      view:            'matrix', // 'matrix' | 'dashboard'
+      dashExpanded:    { projects: false, deliveries: false },
       sidebarOpen:     false,
       sidebarTab:      'timeline',
       sidebarSearch:   '',
@@ -1228,6 +1230,15 @@
                   </button>`
               }
 
+              <div class="flex bg-white rounded-lg border border-slate-200 p-1 shadow-sm gap-1">
+                <button id="btn-view-matrix" class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.view==='matrix'?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
+                  📋 Matriz
+                </button>
+                <button id="btn-view-dashboard" class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.view==='dashboard'?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
+                  📊 Dashboard
+                </button>
+              </div>
+
               <div class="flex bg-white rounded-lg border border-slate-200 p-1 shadow-sm">
                 ${['All','Gerenciamento','Construção'].map(s=>`
                   <button data-sector="${s}" class="sector-btn px-3 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.sectorFilter===s?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
@@ -1273,10 +1284,164 @@
         </div>
       `;
 
+      if (S.view === 'dashboard') return renderDashboardBody();
+
       const types = S.sectorFilter === 'All' ? ['Gerenciamento','Construção'] : [S.sectorFilter];
       return `
         <div class="max-w-[1920px] mx-auto px-4 md:px-8 pb-16 space-y-12 fade-in">
           ${types.map(t => renderSection(t)).join('')}
+          <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
+            <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
+            <span>Farol de Entregas · Trinus .co · v3</span>
+          </footer>
+        </div>
+      `;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DASHBOARD DE DESTAQUES
+    // ═══════════════════════════════════════════════════════
+    function pctColor(pct) {
+      if (pct >= 80) return { bar: 'bg-emerald-500', text: 'text-emerald-700' };
+      if (pct >= 50) return { bar: 'bg-amber-500',   text: 'text-amber-700'   };
+      return           { bar: 'bg-rose-500',    text: 'text-rose-700'    };
+    }
+
+    function dashboardProjects() {
+      return S.projects
+        .filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter)
+        .map(p => {
+          let meta = 0, delivered = 0;
+          S.deliveries.forEach(d => {
+            const s = getStatus(p.id, d.id);
+            if (s !== 'na') meta++;
+            if (s === 'delivered') delivered++;
+          });
+          return { name: p.name, meta, delivered, pct: meta > 0 ? Math.round(delivered / meta * 100) : 0 };
+        })
+        .filter(p => p.meta > 0)
+        .sort((a, b) => b.pct - a.pct);
+    }
+
+    function dashboardDeliveryTypes() {
+      const projects = S.projects.filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter);
+      return S.deliveries
+        .map(d => {
+          const { meta, delivered, pct } = colSummary(d.id, projects);
+          return { name: d.name, full: d.full, kr: d.kr, color: groupColor(d.kr), meta, delivered, pct };
+        })
+        .filter(d => d.meta > 0)
+        .sort((a, b) => b.pct - a.pct);
+    }
+
+    function dashboardCriticalItems(limit = 12) {
+      const projects = S.projects.filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter);
+      const now = new Date();
+      const items = [];
+      projects.forEach(p => {
+        S.deliveries.forEach(d => {
+          if (getStatus(p.id, d.id) !== 'late') return;
+          const dl = S.period.deliveries?.[d.id];
+          const daysLate = dl ? Math.floor((now - new Date(dl + 'T23:59:59')) / 86400000) : 0;
+          items.push({ project: p.name, delivery: d, daysLate });
+        });
+      });
+      return items.sort((a, b) => b.daysLate - a.daysLate).slice(0, limit);
+    }
+
+    function renderDashBarRow(rank, label, pct, sub, color, zone) {
+      const c = pctColor(pct);
+      const zoneCls = zone === 'top' ? 'bg-emerald-50/70 border-emerald-200' : zone === 'bottom' ? 'bg-rose-50/70 border-rose-200' : 'bg-white border-slate-100';
+      const rankCls = zone === 'top' ? 'text-emerald-600' : zone === 'bottom' ? 'text-rose-600' : 'text-slate-300';
+      return `
+        <div class="flex items-center gap-3 px-2.5 py-1.5 rounded-lg border ${zoneCls}">
+          <span class="mono text-[10px] font-extrabold ${rankCls} w-6 text-right shrink-0">#${rank}</span>
+          <span class="text-xs font-medium text-slate-700 w-40 truncate shrink-0" title="${label}">${label}</span>
+          <div class="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden">
+            <div class="h-full rounded-full ${color ? `bg-${color}-500` : c.bar}" style="width:${pct}%"></div>
+          </div>
+          <span class="mono text-[11px] font-extrabold ${c.text} w-10 text-right shrink-0">${pct}%</span>
+          <span class="mono text-[9px] text-slate-400 w-12 text-right shrink-0">${sub}</span>
+        </div>
+      `;
+    }
+
+    // Lista completa ordenada por %, com destaque visual para o top 4 e os 4 últimos colocados.
+    // `key` identifica o card (S.dashExpanded[key]) para lembrar se foi expandido, entre renders.
+    function renderDashRankingCard(key, title, subtitle, list, getLabel, getPct, getSub, getColor) {
+      if (list.length === 0) return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <h3 class="text-sm font-bold text-slate-900">${title}</h3>
+          <p class="text-[11px] text-slate-400 mt-0.5 mb-4">${subtitle}</p>
+          <p class="text-xs text-slate-400 text-center py-8">Sem dados no escopo do período atual.</p>
+        </div>
+      `;
+      const n = list.length;
+      const topN = Math.min(4, Math.ceil(n / 2));
+      const bottomN = Math.min(4, n - topN);
+      const expanded = !!S.dashExpanded[key];
+      return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <div class="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900">${title}</h3>
+              <p class="text-[11px] text-slate-400 mt-0.5">${subtitle}</p>
+            </div>
+            ${n > 8 ? `
+              <button data-dash-expand="${key}" class="shrink-0 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg mono text-[9px] font-bold uppercase tracking-wider text-slate-500 whitespace-nowrap">
+                ${expanded ? '⤡ Recolher' : '⤢ Expandir tudo'}
+              </button>
+            ` : ''}
+          </div>
+          <div class="space-y-1.5 pr-1 ${expanded ? '' : 'max-h-[460px] overflow-y-auto'}">
+            ${list.map((item, i) => {
+              const zone = i < topN ? 'top' : i >= n - bottomN ? 'bottom' : null;
+              return renderDashBarRow(i + 1, getLabel(item), getPct(item), getSub(item), getColor ? getColor(item) : null, zone);
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDashCriticalItems(items) {
+      return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="text-sm font-bold text-slate-900">🔥 Itens Críticos</h3>
+            <span class="mono text-[10px] text-slate-400">${items.length} pares obra + entrega mais atrasados agora</span>
+          </div>
+          <p class="text-[11px] text-slate-400 mb-4">Combinações específicas de obra e entrega com maior atraso em relação ao prazo</p>
+          ${items.length === 0 ? `<p class="text-xs text-slate-400 text-center py-8">Nenhum atraso no momento. 🎉</p>` : `
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              ${items.map(it => `
+                <div class="flex items-center gap-3 p-3 bg-rose-50/50 border border-rose-100 rounded-xl">
+                  <div class="w-9 h-9 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center mono text-[11px] font-extrabold shrink-0">${it.daysLate}d</div>
+                  <div class="min-w-0">
+                    <div class="text-sm font-bold text-slate-800 truncate">${it.project}</div>
+                    <div class="flex items-center gap-1.5 mt-0.5">
+                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(it.delivery.kr)}-100 text-${groupColor(it.delivery.kr)}-700">${it.delivery.kr}</span>
+                      <span class="text-xs text-slate-500 truncate">${it.delivery.full}</span>
+                    </div>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    function renderDashboardBody() {
+      const projects = dashboardProjects();
+      const deliveryTypes = dashboardDeliveryTypes();
+      const critical = dashboardCriticalItems();
+      return `
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pb-16 space-y-6 fade-in">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            ${renderDashRankingCard('projects', '🏗️ Ranking de Obras', 'Todas as obras por % de entregas concluídas — destaque para o top 4 e os 4 últimos colocados', projects, p => p.name, p => p.pct, p => `${p.delivered}/${p.meta}`)}
+            ${renderDashRankingCard('deliveries', '📋 Ranking de Tipos de Entrega', 'Todos os tipos de entrega por % de cumprimento entre as obras — destaque para o top 4 e os 4 últimos colocados', deliveryTypes, d => d.name, d => d.pct, d => `${d.delivered}/${d.meta}`, d => d.color)}
+          </div>
+          ${renderDashCriticalItems(critical)}
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
             <span>Farol de Entregas · Trinus .co · v3</span>
@@ -1672,6 +1837,16 @@
       document.getElementById('btn-sidebar')?.addEventListener('click', openSidebar);
       document.getElementById('btn-login')?.addEventListener('click', showPasswordModal);
       document.getElementById('btn-logout')?.addEventListener('click', logout);
+      document.getElementById('btn-view-matrix')?.addEventListener('click', () => { S.view='matrix'; render(); });
+      document.getElementById('btn-view-dashboard')?.addEventListener('click', () => { S.view='dashboard'; render(); });
+
+      document.querySelectorAll('[data-dash-expand]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.dashExpand;
+          S.dashExpanded[key] = !S.dashExpanded[key];
+          render();
+        });
+      });
 
       document.querySelectorAll('.sector-btn').forEach(btn => {
         btn.addEventListener('click', () => { S.sectorFilter=btn.dataset.sector; render(); });
