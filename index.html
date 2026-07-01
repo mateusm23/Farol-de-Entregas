@@ -145,6 +145,17 @@
       { id:'d14', kr:'KR2', name:'FAROL CONT.',    full:'Gestão à Vista — Farol de Controle', order:14 },
       { id:'d15', kr:'KR2', name:'PROG. SEMANAL',  full:'Gestão à Vista — Prog. Semanal',    order:15 },
     ];
+    const SEED_GROUPS = [
+      { id:'g1', name:'KR1', color:'blue',   order:1 },
+      { id:'g2', name:'KR2', color:'indigo', order:2 },
+    ];
+
+    // Paleta usada para atribuir cor automaticamente a novos grupos (KR3, Vistoria, etc.)
+    const GROUP_COLOR_PALETTE = ['blue','indigo','emerald','amber','rose','violet','cyan','pink','teal','orange','fuchsia','lime'];
+    function nextAutoColor() {
+      const used = new Set(S.groups.map(g => g.color));
+      return GROUP_COLOR_PALETTE.find(c => !used.has(c)) || GROUP_COLOR_PALETTE[S.groups.length % GROUP_COLOR_PALETTE.length];
+    }
 
     // ═══════════════════════════════════════════════════════
     // ESTADO
@@ -158,6 +169,7 @@
       sidebarSearch:   '',
       projects:        [],
       deliveries:      [],
+      groups:          [],
       periods:         [],
       currentPeriodId: null,
       period:          null,
@@ -165,8 +177,22 @@
       history:         [],
       snapshots:       [],
       lastUpdate:      null,
-      loaded:          { projects: false, deliveries: false },
+      loaded:          { projects: false, deliveries: false, groups: false },
     };
+
+    function getGroup(name) { return S.groups.find(g => g.name === name); }
+    function groupColor(name) { return getGroup(name)?.color || 'slate'; }
+    // Agrupa as entregas na ordem dos grupos configurados; entregas cujo grupo foi removido
+    // caem em "Outros" para nunca ficarem escondidas silenciosamente.
+    function groupedDeliveries() {
+      const usedNames = new Set(S.groups.map(g => g.name));
+      const known = S.groups
+        .map(g => ({ group: g, items: S.deliveries.filter(d => d.kr === g.name) }))
+        .filter(k => k.items.length > 0);
+      const orphans = S.deliveries.filter(d => !usedNames.has(d.kr));
+      if (orphans.length) known.push({ group: { id: '_orphan', name: 'Outros', color: 'slate' }, items: orphans });
+      return known;
+    }
 
     // ═══════════════════════════════════════════════════════
     // STATUS LOGIC
@@ -260,14 +286,17 @@
     async function removeProject(id) { await deleteDoc(doc(db, 'projects', id)); }
     async function saveDelivery(d) { await setDoc(doc(db, 'deliveries', d.id), d); }
     async function removeDelivery(id) { await deleteDoc(doc(db, 'deliveries', id)); }
+    async function saveGroup(g)    { await setDoc(doc(db, 'groups', g.id), g); }
+    async function removeGroup(id) { await deleteDoc(doc(db, 'groups', id)); }
 
     // ═══════════════════════════════════════════════════════
     // SEED — escreve dados iniciais se Firestore estiver vazio
     // ═══════════════════════════════════════════════════════
     async function seedIfEmpty() {
-      const [ps, ds] = await Promise.all([
+      const [ps, ds, gs] = await Promise.all([
         getDocs(collection(db, 'projects')),
         getDocs(collection(db, 'deliveries')),
+        getDocs(collection(db, 'groups')),
       ]);
       if (ps.empty) {
         const batch = writeBatch(db);
@@ -279,13 +308,18 @@
         SEED_DELIVERIES.forEach(d => batch.set(doc(db, 'deliveries', d.id), d));
         await batch.commit();
       }
+      if (gs.empty) {
+        const batch = writeBatch(db);
+        SEED_GROUPS.forEach(g => batch.set(doc(db, 'groups', g.id), g));
+        await batch.commit();
+      }
     }
 
     // ═══════════════════════════════════════════════════════
     // LISTENERS
     // ═══════════════════════════════════════════════════════
     let unsubProjects = null, unsubDeliveries = null, unsubPeriods = null;
-    let unsubStatuses = null, unsubHistory = null, unsubSnapshots = null;
+    let unsubStatuses = null, unsubHistory = null, unsubSnapshots = null, unsubGroups = null;
 
     function startListeners() {
       unsubProjects?.();
@@ -299,6 +333,13 @@
       unsubDeliveries = onSnapshot(query(collection(db, 'deliveries'), orderBy('order', 'asc')), snap => {
         S.deliveries = snap.docs.map(d => d.data());
         S.loaded.deliveries = true;
+        renderIfReady();
+      });
+
+      unsubGroups?.();
+      unsubGroups = onSnapshot(query(collection(db, 'groups'), orderBy('order', 'asc')), snap => {
+        S.groups = snap.docs.map(d => d.data());
+        S.loaded.groups = true;
         renderIfReady();
       });
 
@@ -357,7 +398,7 @@
     }
 
     function renderIfReady() {
-      if (S.loaded.projects && S.loaded.deliveries) render();
+      if (S.loaded.projects && S.loaded.deliveries && S.loaded.groups) render();
     }
 
     // ═══════════════════════════════════════════════════════
@@ -414,8 +455,7 @@
       if (isNew) {
         S.projects.forEach(proj => { p.scope[proj.id] = []; });
       }
-      const kr1 = S.deliveries.filter(d => d.kr === 'KR1');
-      const kr2 = S.deliveries.filter(d => d.kr === 'KR2');
+      const groups = groupedDeliveries();
 
       setModal(`
         <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
@@ -448,7 +488,7 @@
                 <div class="grid grid-cols-2 gap-x-8 gap-y-2.5">
                   ${S.deliveries.map(d => `
                     <div class="flex items-center gap-3">
-                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded ${d.kr==='KR1'?'bg-blue-100 text-blue-700':'bg-indigo-100 text-indigo-700'}">${d.kr}</span>
+                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(d.kr)}-100 text-${groupColor(d.kr)}-700">${d.kr}</span>
                       <span class="text-xs text-slate-500 flex-1 truncate">${d.full}</span>
                       <input id="dl-${d.id}" type="date" value="${p.deliveries[d.id]||''}"
                         class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs outline-none focus:border-blue-500 w-36">
@@ -470,8 +510,9 @@
                     <thead>
                       <tr class="bg-slate-50">
                         <th class="text-left px-3 py-2 text-slate-400 font-medium sticky left-0 bg-slate-50 min-w-48">Obra</th>
-                        <th colspan="${kr1.length}" class="text-center py-1.5 mono text-[9px] font-bold text-blue-600 tracking-widest border-b border-blue-100">KR1</th>
-                        <th colspan="${kr2.length}" class="text-center py-1.5 mono text-[9px] font-bold text-indigo-600 tracking-widest border-b border-indigo-100">KR2</th>
+                        ${groups.map(({group, items}) => `
+                          <th colspan="${items.length}" class="text-center py-1.5 mono text-[9px] font-bold text-${group.color}-600 tracking-widest border-b border-${group.color}-100">${group.name}</th>
+                        `).join('')}
                       </tr>
                       <tr class="bg-slate-50 border-b border-slate-100">
                         <th class="sticky left-0 bg-slate-50 px-3 py-1"></th>
@@ -555,6 +596,16 @@
     // MODAL ADMIN (obras e entregas)
     // ═══════════════════════════════════════════════════════
     function showAdminModal(tab = 'projects') {
+      // Contadores locais de ordem — evitam colisão quando o listener do
+      // Firestore ainda não refletiu o item recém-criado (S.projects/S.deliveries/S.groups desatualizados).
+      let nextProjOrder  = Math.max(...S.projects.map(p => p.order || 0), 0);
+      let nextDelOrder   = Math.max(...S.deliveries.map(d => d.order || 0), 0);
+      let nextGroupOrder = Math.max(...S.groups.map(g => g.order || 0), 0);
+      let dragItem = null; // { kind: 'project'|'delivery'|'group', id }
+      let editingProjId  = null;
+      let editingDelId   = null;
+      let editingGroupId = null;
+
       const renderAdmin = (activeTab) => `
         <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
           <div class="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 fade-in">
@@ -565,14 +616,31 @@
             <div class="flex bg-slate-100 m-4 p-1 rounded-xl gap-1">
               <button onclick="window._adminTab('projects')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='projects'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏗️ Obras (${S.projects.length})</button>
               <button onclick="window._adminTab('deliveries')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='deliveries'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">📋 Entregas (${S.deliveries.length})</button>
+              <button onclick="window._adminTab('groups')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='groups'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏷️ Grupos (${S.groups.length})</button>
             </div>
             <div class="flex-1 overflow-y-auto px-4 pb-4">
               ${activeTab === 'projects' ? `
+                <p class="text-[11px] text-slate-400 mb-2">Arraste ⠿ para reordenar as linhas da matriz.</p>
                 <div class="space-y-1.5 mb-4">
-                  ${S.projects.map(p => `
-                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors">
+                  ${S.projects.map(p => p.id === editingProjId ? `
+                    <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                      <input id="edit-proj-name-${p.id}" value="${p.name}"
+                        class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                        onkeydown="if(event.key==='Enter') window._saveProjectEdit('${p.id}'); if(event.key==='Escape') window._cancelEdit();">
+                      <select id="edit-proj-type-${p.id}" class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                        <option value="Gerenciamento" ${p.type==='Gerenciamento'?'selected':''}>Gerenciamento</option>
+                        <option value="Construção" ${p.type==='Construção'?'selected':''}>Construção</option>
+                      </select>
+                      <button onclick="window._saveProjectEdit('${p.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                      <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                    </div>
+                  ` : `
+                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                      draggable="true" data-admin-drag="project" data-id="${p.id}">
+                      <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
                       <span class="flex-1 text-sm font-medium text-slate-700">${p.name}</span>
                       <span class="mono text-[10px] px-2 py-0.5 rounded ${p.type==='Gerenciamento'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700'}">${p.type}</span>
+                      <button onclick="window._editProject('${p.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
                       <button onclick="window._removeProject('${p.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
                     </div>
                   `).join('')}
@@ -588,17 +656,40 @@
                     <button onclick="window._addProject()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
                   </div>
                 </div>
-              ` : `
-                <div class="space-y-1.5 mb-4">
-                  ${S.deliveries.map(d => `
-                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors">
-                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded ${d.kr==='KR1'?'bg-blue-100 text-blue-700':'bg-indigo-100 text-indigo-700'}">${d.kr}</span>
-                      <span class="flex-1 text-sm font-medium text-slate-700">${d.full}</span>
-                      <span class="mono text-[10px] text-slate-400">${d.name}</span>
-                      <button onclick="window._removeDelivery('${d.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+              ` : activeTab === 'deliveries' ? `
+                <p class="text-[11px] text-slate-400 mb-2">Arraste ⠿ para reordenar as colunas da matriz (dentro do mesmo grupo). Grupos são criados na aba 🏷️ Grupos.</p>
+                ${S.groups.map(g => `
+                  <div class="mb-3">
+                    <div class="mono text-[9px] font-bold uppercase tracking-widest text-${g.color}-600 px-1 mb-1.5">${g.name}</div>
+                    <div class="space-y-1.5">
+                      ${S.deliveries.filter(d=>d.kr===g.name).map(d => d.id === editingDelId ? `
+                        <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                          <input id="edit-del-full-${d.id}" value="${d.full}" placeholder="Nome completo"
+                            class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                            onkeydown="if(event.key==='Enter') window._saveDeliveryEdit('${d.id}'); if(event.key==='Escape') window._cancelEdit();">
+                          <input id="edit-del-name-${d.id}" value="${d.name}" placeholder="Abreviação"
+                            class="w-40 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs mono outline-none focus:border-blue-500"
+                            onkeydown="if(event.key==='Enter') window._saveDeliveryEdit('${d.id}'); if(event.key==='Escape') window._cancelEdit();">
+                          <select id="edit-del-kr-${d.id}" class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                            ${S.groups.map(gr => `<option value="${gr.name}" ${d.kr===gr.name?'selected':''}>${gr.name}</option>`).join('')}
+                          </select>
+                          <button onclick="window._saveDeliveryEdit('${d.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                          <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                        </div>
+                      ` : `
+                        <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                          draggable="true" data-admin-drag="delivery" data-id="${d.id}">
+                          <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
+                          <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${g.color}-100 text-${g.color}-700">${d.kr}</span>
+                          <span class="flex-1 text-sm font-medium text-slate-700">${d.full}</span>
+                          <span class="mono text-[10px] text-slate-400">${d.name}</span>
+                          <button onclick="window._editDelivery('${d.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
+                          <button onclick="window._removeDelivery('${d.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+                        </div>
+                      `).join('')}
                     </div>
-                  `).join('')}
-                </div>
+                  </div>
+                `).join('')}
                 <div class="border-t border-slate-100 pt-4">
                   <h4 class="mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Adicionar entrega</h4>
                   <div class="grid grid-cols-2 gap-2 mb-2">
@@ -607,11 +698,48 @@
                   </div>
                   <div class="flex gap-2">
                     <select id="new-del-kr" class="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
-                      <option value="KR1">KR1</option>
-                      <option value="KR2">KR2</option>
+                      ${S.groups.map(g => `<option value="${g.name}">${g.name}</option>`).join('')}
                     </select>
                     <button onclick="window._addDelivery()" class="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
                   </div>
+                </div>
+              ` : `
+                <p class="text-[11px] text-slate-400 mb-2">Grupos organizam as entregas em colunas (ex: KR1, KR2, Vistoria). Arraste ⠿ para reordenar.</p>
+                <div class="space-y-1.5 mb-4">
+                  ${S.groups.map(g => g.id === editingGroupId ? `
+                    <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                      <span id="group-color-dot-${g.id}" class="w-4 h-4 rounded-full inline-block bg-${g.color}-500 border border-white shadow shrink-0"></span>
+                      <input id="edit-group-name-${g.id}" value="${g.name}"
+                        class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                        onkeydown="if(event.key==='Enter') window._saveGroupEdit('${g.id}'); if(event.key==='Escape') window._cancelEdit();">
+                      <select id="edit-group-color-${g.id}"
+                        onchange="document.getElementById('group-color-dot-${g.id}').className='w-4 h-4 rounded-full inline-block bg-'+this.value+'-500 border border-white shadow shrink-0'"
+                        class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                        ${GROUP_COLOR_PALETTE.map(c => `<option value="${c}" ${g.color===c?'selected':''}>${c}</option>`).join('')}
+                      </select>
+                      <button onclick="window._saveGroupEdit('${g.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                      <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                    </div>
+                  ` : `
+                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                      draggable="true" data-admin-drag="group" data-id="${g.id}">
+                      <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
+                      <span class="w-4 h-4 rounded-full inline-block bg-${g.color}-500 border border-white shadow shrink-0"></span>
+                      <span class="flex-1 text-sm font-medium text-slate-700">${g.name}</span>
+                      <span class="mono text-[10px] text-slate-400">${S.deliveries.filter(d=>d.kr===g.name).length} entrega(s)</span>
+                      <button onclick="window._editGroup('${g.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
+                      <button onclick="window._removeGroup('${g.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+                    </div>
+                  `).join('')}
+                </div>
+                <div class="border-t border-slate-100 pt-4">
+                  <h4 class="mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Adicionar grupo</h4>
+                  <div class="flex gap-2">
+                    <input id="new-group-name" placeholder="Nome do grupo (ex: KR3, Vistoria)" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      onkeydown="if(event.key==='Enter') window._addGroup();">
+                    <button onclick="window._addGroup()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
+                  </div>
+                  <p class="text-[10px] text-slate-400 mt-2">A cor é escolhida automaticamente; edite ✎ depois se quiser trocar.</p>
                 </div>
               `}
             </div>
@@ -620,18 +748,148 @@
       `;
 
       setModal(renderAdmin(tab));
+      attachAdminDragEvents(tab);
 
-      window._adminTab = (t) => { setModal(renderAdmin(t)); window._adminTab = (t2) => { setModal(renderAdmin(t2)); }; };
-      window._removeProject = async id => { if(confirm('Remover obra?')) { await removeProject(id); setModal(renderAdmin('projects')); }};
-      window._removeDelivery = async id => { if(confirm('Remover entrega?')) { await removeDelivery(id); setModal(renderAdmin('deliveries')); }};
+      function attachAdminDragEvents(activeTab) {
+        document.querySelectorAll('[data-admin-drag]').forEach(row => {
+          row.addEventListener('dragstart', () => {
+            dragItem = { kind: row.dataset.adminDrag, id: row.dataset.id };
+            row.classList.add('opacity-40');
+          });
+          row.addEventListener('dragend', () => row.classList.remove('opacity-40'));
+          row.addEventListener('dragover', e => e.preventDefault());
+          row.addEventListener('drop', async e => {
+            e.preventDefault();
+            const targetId = row.dataset.id;
+            const kind = row.dataset.adminDrag;
+            if (!dragItem || dragItem.kind !== kind || dragItem.id === targetId) return;
+            if (kind === 'project') await reorderProjects(dragItem.id, targetId);
+            else if (kind === 'delivery') await reorderDeliveries(dragItem.id, targetId);
+            else await reorderGroups(dragItem.id, targetId);
+            dragItem = null;
+            setModal(renderAdmin(activeTab));
+            attachAdminDragEvents(activeTab);
+          });
+        });
+      }
+
+      async function reorderProjects(draggedId, targetId) {
+        const arr = [...S.projects];
+        const from = arr.findIndex(p => p.id === draggedId);
+        const to   = arr.findIndex(p => p.id === targetId);
+        if (from < 0 || to < 0) return;
+        const [item] = arr.splice(from, 1);
+        arr.splice(to, 0, item);
+        const batch = writeBatch(db);
+        arr.forEach((p, i) => batch.set(doc(db, 'projects', p.id), { ...p, order: i + 1 }));
+        await batch.commit();
+        nextProjOrder = arr.length;
+      }
+
+      async function reorderGroups(draggedId, targetId) {
+        const arr = [...S.groups];
+        const from = arr.findIndex(g => g.id === draggedId);
+        const to   = arr.findIndex(g => g.id === targetId);
+        if (from < 0 || to < 0) return;
+        const [item] = arr.splice(from, 1);
+        arr.splice(to, 0, item);
+        const batch = writeBatch(db);
+        arr.forEach((g, i) => batch.set(doc(db, 'groups', g.id), { ...g, order: i + 1 }));
+        await batch.commit();
+        nextGroupOrder = arr.length;
+      }
+
+      async function reorderDeliveries(draggedId, targetId) {
+        const dragged = S.deliveries.find(d => d.id === draggedId);
+        const target  = S.deliveries.find(d => d.id === targetId);
+        if (!dragged || !target || dragged.kr !== target.kr) return; // restrito ao mesmo grupo
+        const group = S.deliveries.filter(d => d.kr === dragged.kr);
+        const from = group.findIndex(d => d.id === draggedId);
+        const to   = group.findIndex(d => d.id === targetId);
+        const [item] = group.splice(from, 1);
+        group.splice(to, 0, item);
+        // Reconstrói a lista completa preservando a ordem dos grupos (S.groups) com o
+        // grupo reordenado substituído — funciona para qualquer quantidade de grupos.
+        const merged = [];
+        S.groups.forEach(g => merged.push(...(g.name === dragged.kr ? group : S.deliveries.filter(d => d.kr === g.name))));
+        const knownNames = new Set(S.groups.map(g => g.name));
+        merged.push(...S.deliveries.filter(d => !knownNames.has(d.kr)));
+        const batch = writeBatch(db);
+        merged.forEach((d, i) => batch.set(doc(db, 'deliveries', d.id), { ...d, order: i + 1 }));
+        await batch.commit();
+        nextDelOrder = merged.length;
+      }
+
+      window._adminTab = (t) => { editingProjId = null; editingDelId = null; editingGroupId = null; setModal(renderAdmin(t)); attachAdminDragEvents(t); };
+      window._removeProject = async id => { if(confirm('Remover obra?')) { await removeProject(id); setModal(renderAdmin('projects')); attachAdminDragEvents('projects'); }};
+      window._removeDelivery = async id => { if(confirm('Remover entrega?')) { await removeDelivery(id); setModal(renderAdmin('deliveries')); attachAdminDragEvents('deliveries'); }};
+      window._removeGroup = async id => {
+        const group = S.groups.find(g => g.id === id);
+        const affected = S.deliveries.filter(d => d.kr === group.name).length;
+        if (affected > 0) { alert(`Não é possível remover: ${affected} entrega(s) usam o grupo "${group.name}". Edite essas entregas para outro grupo primeiro.`); return; }
+        if (!confirm('Remover grupo?')) return;
+        await removeGroup(id);
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
+      };
+      window._editProject = id => { editingProjId = id; setModal(renderAdmin('projects')); attachAdminDragEvents('projects'); document.getElementById(`edit-proj-name-${id}`)?.focus(); };
+      window._editDelivery = id => { editingDelId = id; setModal(renderAdmin('deliveries')); attachAdminDragEvents('deliveries'); document.getElementById(`edit-del-full-${id}`)?.focus(); };
+      window._editGroup = id => { editingGroupId = id; setModal(renderAdmin('groups')); attachAdminDragEvents('groups'); document.getElementById(`edit-group-name-${id}`)?.focus(); };
+      window._cancelEdit = () => {
+        const tab = editingGroupId !== null ? 'groups' : editingDelId !== null ? 'deliveries' : 'projects';
+        editingProjId = null; editingDelId = null; editingGroupId = null;
+        setModal(renderAdmin(tab));
+        attachAdminDragEvents(tab);
+      };
+      window._saveProjectEdit = async id => {
+        const name = document.getElementById(`edit-proj-name-${id}`).value.trim();
+        const type = document.getElementById(`edit-proj-type-${id}`).value;
+        if (!name) return;
+        const proj = S.projects.find(p => p.id === id);
+        await saveProject({ ...proj, name, type });
+        editingProjId = null;
+        setModal(renderAdmin('projects'));
+        attachAdminDragEvents('projects');
+      };
+      window._saveDeliveryEdit = async id => {
+        const full = document.getElementById(`edit-del-full-${id}`).value.trim();
+        const name = document.getElementById(`edit-del-name-${id}`).value.trim();
+        const kr   = document.getElementById(`edit-del-kr-${id}`).value;
+        if (!full || !name) return;
+        const deliv = S.deliveries.find(d => d.id === id);
+        await saveDelivery({ ...deliv, full, name, kr });
+        editingDelId = null;
+        setModal(renderAdmin('deliveries'));
+        attachAdminDragEvents('deliveries');
+      };
+      window._saveGroupEdit = async id => {
+        const name  = document.getElementById(`edit-group-name-${id}`).value.trim();
+        const color = document.getElementById(`edit-group-color-${id}`).value;
+        if (!name) return;
+        const group = S.groups.find(g => g.id === id);
+        const oldName = group.name;
+        await saveGroup({ ...group, name, color });
+        if (oldName !== name) {
+          const affected = S.deliveries.filter(d => d.kr === oldName);
+          if (affected.length) {
+            const batch = writeBatch(db);
+            affected.forEach(d => batch.set(doc(db, 'deliveries', d.id), { ...d, kr: name }));
+            await batch.commit();
+          }
+        }
+        editingGroupId = null;
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
+      };
       window._addProject = async () => {
         const name = document.getElementById('new-proj-name').value.trim();
         const type = document.getElementById('new-proj-type').value;
         if (!name) return;
         const id = 'p' + Date.now();
-        const order = Math.max(...S.projects.map(p=>p.order||0), 0) + 1;
+        const order = ++nextProjOrder;
         await saveProject({ id, name, type, order });
         setModal(renderAdmin('projects'));
+        attachAdminDragEvents('projects');
       };
       window._addDelivery = async () => {
         const name = document.getElementById('new-del-name').value.trim();
@@ -639,9 +897,21 @@
         const kr   = document.getElementById('new-del-kr').value;
         if (!name || !full) return;
         const id = 'd' + Date.now();
-        const order = Math.max(...S.deliveries.map(d=>d.order||0), 0) + 1;
+        const order = ++nextDelOrder;
         await saveDelivery({ id, name, full, kr, order });
         setModal(renderAdmin('deliveries'));
+        attachAdminDragEvents('deliveries');
+      };
+      window._addGroup = async () => {
+        const name = document.getElementById('new-group-name').value.trim();
+        if (!name) return;
+        if (S.groups.some(g => g.name === name)) { alert('Já existe um grupo com esse nome.'); return; }
+        const id = 'g' + Date.now();
+        const order = ++nextGroupOrder;
+        const color = nextAutoColor();
+        await saveGroup({ id, name, color, order });
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
       };
     }
 
@@ -896,7 +1166,7 @@
     // RENDER — MAIN
     // ═══════════════════════════════════════════════════════
     function render() {
-      if (!S.loaded.projects || !S.loaded.deliveries) return;
+      if (!S.loaded.projects || !S.loaded.deliveries || !S.loaded.groups) return;
       document.getElementById('app').innerHTML = renderHeader() + renderBody();
       attachEvents();
     }
@@ -904,7 +1174,7 @@
     function renderHeader() {
       const { meta, delivered, pct } = calcTotals();
       return `
-        <div class="max-w-[1600px] mx-auto px-4 md:px-8 pt-8">
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pt-8">
           <header class="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-6 px-2">
             <div>
               <div class="flex items-center gap-4 mb-2">
@@ -920,7 +1190,7 @@
               </div>
               <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 mb-1">PAINEL DE MONITORAMENTO</h1>
               <p class="text-slate-500 text-sm">
-                Acompanhamento em tempo real das entregas técnicas KR1 e KR2 para ${S.projects.length} obras ativas.
+                Acompanhamento em tempo real das entregas técnicas para ${S.projects.length} obras ativas.
               </p>
             </div>
 
@@ -993,7 +1263,7 @@
 
     function renderBody() {
       if (!S.period) return `
-        <div class="max-w-[1600px] mx-auto px-8 pb-16 fade-in">
+        <div class="max-w-[1920px] mx-auto px-8 pb-16 fade-in">
           <div class="flex flex-col items-center justify-center py-32 text-slate-400">
             <div class="text-6xl mb-4">🏗️</div>
             <p class="text-lg font-bold text-slate-700 mb-1">Nenhum período configurado</p>
@@ -1005,11 +1275,11 @@
 
       const types = S.sectorFilter === 'All' ? ['Gerenciamento','Construção'] : [S.sectorFilter];
       return `
-        <div class="max-w-[1600px] mx-auto px-4 md:px-8 pb-16 space-y-12 fade-in">
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pb-16 space-y-12 fade-in">
           ${types.map(t => renderSection(t)).join('')}
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
-            <span>Farol de Entregas · Trinus .co · v2</span>
+            <span>Farol de Entregas · Trinus .co · v3</span>
           </footer>
         </div>
       `;
@@ -1019,8 +1289,8 @@
       let projects = S.projects.filter(p => p.type === type);
       if (S.showLateOnly) projects = projects.filter(p => S.deliveries.some(d => getStatus(p.id,d.id) === 'late'));
       if (projects.length === 0) return '';
-      const kr1 = S.deliveries.filter(d => d.kr === 'KR1');
-      const kr2 = S.deliveries.filter(d => d.kr === 'KR2');
+      const groups = groupedDeliveries();
+      const flatDeliveries = groups.flatMap(({group, items}) => items.map(d => ({ d, color: group.color })));
 
       return `
         <div class="space-y-4">
@@ -1034,25 +1304,17 @@
               <table class="w-full border-collapse">
                 <thead>
                   <tr class="bg-slate-100">
-                    <th class="sticky-col bg-slate-100 p-3 text-left border-b border-r border-slate-200 min-w-[210px]">
+                    <th class="sticky-col bg-slate-100 p-3 text-left border-b border-r border-slate-200 min-w-[240px]">
                       <div class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">📄 Empreendimento</div>
                     </th>
-                    ${kr1.map(d => {
+                    ${flatDeliveries.map(({d, color}, di) => {
                       const dl = S.period?.deliveries?.[d.id];
                       const past = dl && new Date(dl+'T23:59:59') < new Date();
-                      return `<th class="p-1.5 border-b border-r border-blue-200 min-w-[65px] text-center bg-blue-100/40" title="${d.full}">
-                        <div class="mono text-[9px] font-bold text-blue-700 mb-0.5">KR1</div>
-                        <div class="text-[11px] font-bold text-blue-950 leading-tight">${d.name}</div>
-                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':'text-blue-400'}">${fmtDate(dl)}</div>`:''}
-                      </th>`;
-                    }).join('')}
-                    ${kr2.map((d,i) => {
-                      const dl = S.period?.deliveries?.[d.id];
-                      const past = dl && new Date(dl+'T23:59:59') < new Date();
-                      return `<th class="p-1.5 border-b border-r border-indigo-200 min-w-[65px] text-center bg-indigo-100/40 ${i===0?'border-l-2 border-l-slate-300':''}" title="${d.full}">
-                        <div class="mono text-[9px] font-bold text-indigo-700 mb-0.5">KR2</div>
-                        <div class="text-[11px] font-bold text-indigo-950 leading-tight">${d.name}</div>
-                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':'text-indigo-400'}">${fmtDate(dl)}</div>`:''}
+                      const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
+                      return `<th class="p-1.5 border-b border-r border-${color}-200 min-w-[65px] text-center bg-${color}-100/40 ${boundary?'border-l-2 border-l-slate-300':''}" title="${d.full}">
+                        <div class="mono text-[9px] font-bold text-${color}-700 mb-0.5">${d.kr}</div>
+                        <div class="text-[11px] font-bold text-${color}-950 leading-tight">${d.name}</div>
+                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':`text-${color}-400`}">${fmtDate(dl)}</div>`:''}
                       </th>`;
                     }).join('')}
                   </tr>
@@ -1063,10 +1325,10 @@
                       <td class="sticky-col bg-inherit p-3 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.04)]">
                         <span class="text-[13px] font-bold text-slate-800 group-hover:text-blue-600 transition-colors">${proj.name}</span>
                       </td>
-                      ${S.deliveries.map((d,di) => {
+                      ${flatDeliveries.map(({d, color}, di) => {
                         const s = getStatus(proj.id,d.id);
-                        const kr2Start = d.id === (S.deliveries.find(x=>x.kr==='KR2')?.id);
-                        return `<td class="p-1 border-b border-r border-slate-100 text-center ${kr2Start?'border-l-2 border-l-slate-200':''} ${d.kr==='KR1'?'bg-blue-50/5':'bg-indigo-50/5'}">
+                        const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
+                        return `<td class="p-1 border-b border-r border-slate-100 text-center ${boundary?'border-l-2 border-l-slate-200':''} bg-${color}-50/5">
                           <div class="cell ${s==='na'?'cell-na':''} w-full py-1.5 rounded-md border mono text-[11px] font-bold shadow-sm transition-colors duration-150 ${S.isEditor&&s!=='na'?'hover:scale-105 active:scale-95':''} ${cellStyle(s)}"
                             data-pid="${proj.id}" data-did="${d.id}">
                             ${cellText(s)}
@@ -1087,12 +1349,13 @@
     }
 
     function renderTfootRows(projects) {
+      const flatDeliveries = groupedDeliveries().flatMap(({items}) => items);
       return `
         <tr class="bg-slate-50/80 border-b border-slate-200">
           <td class="sticky-col bg-slate-200 p-3 border-r border-slate-300 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
             <div class="mono text-[11px] font-bold text-slate-600 uppercase tracking-widest text-right pr-2">Aplicável</div>
           </td>
-          ${S.deliveries.map(d => {
+          ${flatDeliveries.map(d => {
             const { meta } = colSummary(d.id, projects);
             return `<td class="p-1.5 text-center border-r border-slate-200">
               <div class="mono text-[13px] font-bold text-slate-900 bg-white/60 rounded py-0.5">${meta}</div>
@@ -1103,7 +1366,7 @@
           <td class="sticky-col bg-emerald-100 p-3 border-r border-emerald-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.06)]">
             <div class="mono text-[11px] font-bold text-emerald-800 uppercase tracking-widest text-right pr-2">Entregue OK</div>
           </td>
-          ${S.deliveries.map(d => {
+          ${flatDeliveries.map(d => {
             const { meta, delivered, pct } = colSummary(d.id, projects);
             return `<td class="p-1.5 text-center border-r border-emerald-100">
               <div class="flex items-center justify-center gap-1">
