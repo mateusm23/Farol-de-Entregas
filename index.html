@@ -93,7 +93,16 @@
     // ═══════════════════════════════════════════════════════
     // SENHA
     // ═══════════════════════════════════════════════════════
-    const SENHA_EDITOR = "trinus2025";
+    // Guarda só o hash da senha (PBKDF2-SHA256), nunca a senha. Gerar com gerar-hash-senha.html.
+    const SENHA_SALT = "a582a2b1d37c19c539198008f388822f";
+    const SENHA_ITER = 200000;
+    const SENHA_HASH = "c5f6e0e5507d99c757161888ecdd7ad0364a4b06e89bc77c0e3be9a96958ad8f";
+    async function hashSenha(pwd) {
+      const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pwd), 'PBKDF2', false, ['deriveBits']);
+      const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(SENHA_SALT), iterations: SENHA_ITER }, key, 256);
+      return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
 
     // ═══════════════════════════════════════════════════════
     // DADOS INICIAIS (seed no primeiro acesso)
@@ -419,7 +428,7 @@
     // ═══════════════════════════════════════════════════════
     // SENHA
     // ═══════════════════════════════════════════════════════
-    function initEditor() { S.isEditor = localStorage.getItem('farol_auth') === SENHA_EDITOR; }
+    function initEditor() { S.isEditor = !!SENHA_HASH && localStorage.getItem('farol_auth') === SENHA_HASH; }
 
     function showPasswordModal() {
       setModal(`
@@ -444,10 +453,11 @@
         </div>
       `);
       setTimeout(() => document.getElementById('pwd-input')?.focus(), 50);
-      window._submitPwd = () => {
+      window._submitPwd = async () => {
         const val = document.getElementById('pwd-input').value;
-        if (val === SENHA_EDITOR) {
-          localStorage.setItem('farol_auth', val);
+        const h = await hashSenha(val);
+        if (SENHA_HASH && h === SENHA_HASH) {
+          localStorage.setItem('farol_auth', h);
           S.isEditor = true; closeModal(); render();
         } else {
           document.getElementById('pwd-err').classList.remove('hidden');
@@ -470,6 +480,30 @@
       if (isNew) {
         S.projects.forEach(proj => { p.scope[proj.id] = []; });
       }
+      // Novo período: já nasce copiando o escopo do período mais recente (os prazos não são copiados)
+      const periodsByRecent = [...S.periods].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+      const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+      const suggestFrom = src => {
+        const [y, m] = (src?.startDate || '').split('-').map(Number);
+        if (!y || !m) return { name: '', startDate: '', endDate: '' };
+        const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1; // nm é 1 a 12
+        const pad = n => String(n).padStart(2, '0');
+        return {
+          name: `${MESES[nm - 1]} ${ny}`,
+          startDate: `${ny}-${pad(nm)}-01`,
+          endDate: `${ny}-${pad(nm)}-${pad(new Date(ny, nm, 0).getDate())}`,
+        };
+      };
+      const scopeFrom = src => {
+        const sc = {};
+        S.projects.forEach(proj => { sc[proj.id] = [...(src?.scope?.[proj.id] || [])]; });
+        return sc;
+      };
+      if (isNew && periodsByRecent.length) {
+        const first = periodsByRecent[0];
+        Object.assign(p, suggestFrom(first), { scope: scopeFrom(first) });
+      }
+      let lastSuggestion = isNew ? { name: p.name, startDate: p.startDate, endDate: p.endDate } : null;
       const groups = groupedDeliveries();
 
       setModal(`
@@ -480,6 +514,17 @@
               <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
             </div>
             <div class="flex-1 overflow-y-auto p-6 space-y-6">
+              ${isNew && periodsByRecent.length ? `
+                <div class="flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
+                  <label class="mono text-[10px] font-bold text-blue-700 uppercase tracking-widest">Copiar escopo de</label>
+                  <select id="s-copy" onchange="window._copyFrom(this.value)"
+                    class="bg-white border border-blue-200 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-blue-500">
+                    ${periodsByRecent.map((pp, i) => `<option value="${pp.id}" ${i === 0 ? 'selected' : ''}>${pp.name}</option>`).join('')}
+                    <option value="">Nenhum (começar vazio)</option>
+                  </select>
+                  <span class="text-xs text-slate-500">Traz só as marcações de obra e entrega. Os prazos você preenche.</span>
+                </div>
+              ` : ''}
               <div class="grid grid-cols-3 gap-4">
                 <div>
                   <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Nome</label>
@@ -521,7 +566,7 @@
                   </div>
                 </div>
                 <div class="overflow-x-auto border border-slate-100 rounded-xl">
-                  <table class="text-xs border-collapse w-full">
+                  <table id="scope-table" class="text-xs border-collapse w-full" style="user-select:none">
                     <thead>
                       <tr class="bg-slate-50">
                         <th class="text-left px-3 py-2 text-slate-400 font-medium sticky left-0 bg-slate-50 min-w-48">Obra</th>
@@ -532,7 +577,7 @@
                       <tr class="bg-slate-50 border-b border-slate-100">
                         <th class="sticky left-0 bg-slate-50 px-3 py-1"></th>
                         ${S.deliveries.map(d => `
-                          <th class="px-1 py-1 text-center" style="min-width:44px">
+                          <th class="px-1 py-1 text-center cursor-pointer hover:bg-blue-50" style="min-width:44px" data-col="${d.id}" title="Clique para marcar ou desmarcar a coluna inteira">
                             <span class="text-slate-400 font-normal" style="writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block;height:65px;font-size:9px">${d.name}</span>
                           </th>
                         `).join('')}
@@ -543,10 +588,10 @@
                         `<tr><td colspan="${S.deliveries.length+1}" class="px-3 py-1 mono text-[9px] uppercase tracking-widest text-slate-400 bg-slate-50 font-bold">${type}</td></tr>`,
                         ...S.projects.filter(pr=>pr.type===type).map(proj=>`
                           <tr class="border-b border-slate-50 hover:bg-blue-50/30">
-                            <td class="sticky left-0 bg-white hover:bg-blue-50/30 px-3 py-1.5 text-slate-700 whitespace-nowrap font-medium">${proj.name}</td>
+                            <td class="sticky left-0 bg-white hover:bg-blue-50/30 px-3 py-1.5 text-slate-700 whitespace-nowrap font-medium cursor-pointer" data-row="${proj.id}" title="Clique para marcar ou desmarcar a linha inteira">${proj.name}</td>
                             ${S.deliveries.map(d=>`
-                              <td class="px-1 py-1 text-center">
-                                <input type="checkbox" id="sc-${proj.id}-${d.id}"
+                              <td class="px-1 py-1 text-center cursor-pointer" data-cell="sc-${proj.id}-${d.id}">
+                                <input type="checkbox" id="sc-${proj.id}-${d.id}" style="pointer-events:none"
                                   ${(p.scope[proj.id]||[]).includes(d.id)?'checked':''}
                                   class="w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer">
                               </td>
@@ -578,6 +623,63 @@
         </div>
       `);
 
+      window._copyFrom = srcId => {
+        const src = S.periods.find(x => x.id === srcId);
+        const sc = scopeFrom(src);
+        S.projects.forEach(pr => S.deliveries.forEach(d => {
+          const el = document.getElementById(`sc-${pr.id}-${d.id}`);
+          if (el) el.checked = sc[pr.id].includes(d.id);
+        }));
+        // Só troca nome e datas se ainda forem a última sugestão (ou estiverem vazios)
+        const sug = src ? suggestFrom(src) : { name: '', startDate: '', endDate: '' };
+        [['s-name', 'name'], ['s-start', 'startDate'], ['s-end', 'endDate']].forEach(([elId, k]) => {
+          const el = document.getElementById(elId);
+          if (el && (!el.value || el.value === lastSuggestion[k])) el.value = sug[k];
+        });
+        lastSuggestion = sug;
+      };
+      // Clicar e arrastar: a primeira célula define o estado (marcar ou desmarcar) aplicado às demais
+      {
+        const table = document.getElementById('scope-table');
+        const box = id => document.getElementById(id);
+        let painting = null; // true/false enquanto o mouse está pressionado
+        const paint = td => { const el = td && box(td.dataset.cell); if (el) el.checked = painting; };
+        const toggleGroup = ids => {
+          const els = ids.map(box).filter(Boolean);
+          const all = els.every(e => e.checked);
+          els.forEach(e => { e.checked = !all; });
+        };
+        table.addEventListener('mousedown', e => {
+          if (e.button !== 0) return;
+          const cell = e.target.closest('[data-cell]');
+          if (cell) {
+            painting = !box(cell.dataset.cell).checked;
+            paint(cell);
+            e.preventDefault();
+            return;
+          }
+          const row = e.target.closest('[data-row]');
+          if (row) toggleGroup(S.deliveries.map(d => `sc-${row.dataset.row}-${d.id}`));
+          const col = e.target.closest('[data-col]');
+          if (col) toggleGroup(S.projects.map(pr => `sc-${pr.id}-${col.dataset.col}`));
+        });
+        // Percorre a reta entre duas posições do mouse, para não pular células em movimentos rápidos
+        let last = null;
+        const paintLine = (x0, y0, x1, y1) => {
+          const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
+          for (let i = 1; i <= steps; i++) {
+            const el = document.elementFromPoint(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+            paint(el && el.closest('[data-cell]'));
+          }
+        };
+        table.addEventListener('mousedown', e => { last = { x: e.clientX, y: e.clientY }; });
+        document.addEventListener('mousemove', e => {
+          if (painting === null || !last) return;
+          paintLine(last.x, last.y, e.clientX, e.clientY);
+          last = { x: e.clientX, y: e.clientY };
+        });
+        document.addEventListener('mouseup', () => { painting = null; last = null; });
+      }
       window._toggleAll = v => S.projects.forEach(pr => S.deliveries.forEach(d => {
         const el = document.getElementById(`sc-${pr.id}-${d.id}`); if (el) el.checked = v;
       }));
@@ -590,7 +692,9 @@
         S.deliveries.forEach(d => { const v = document.getElementById(`dl-${d.id}`)?.value; if(v) deliveries[d.id]=v; });
         const scope = {};
         S.projects.forEach(pr => { scope[pr.id] = S.deliveries.filter(d=>document.getElementById(`sc-${pr.id}-${d.id}`)?.checked).map(d=>d.id); });
-        await savePeriod({ id, name, startDate, endDate, deliveries, scope });
+        // Mantém a estrela de período principal (setDoc regrava o documento inteiro)
+        const isPrimary = !!S.periods.find(x => x.id === id)?.isPrimary;
+        await savePeriod({ id, name, startDate, endDate, deliveries, scope, isPrimary });
         S.currentPeriodId = id; closeModal(); scheduleDailySnapshot();
       };
       window._deletePeriod = async id => {
