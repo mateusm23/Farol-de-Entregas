@@ -1,0 +1,2179 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Farol de Entregas — Trinus</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    body { background-color: #f8fafc; }
+
+    .sticky-col { position: sticky; left: 0; z-index: 10; }
+
+    .cell { transition: background-color 0.15s ease, color 0.15s ease; cursor: pointer; user-select: none; }
+    .cell:hover  { filter: brightness(0.93); }
+    .cell:active { transform: scale(0.92); }
+    .cell-na     { cursor: default !important; filter: none !important; }
+
+    #sidebar {
+      position: fixed; top: 0; right: 0; bottom: 0;
+      width: 100%; max-width: 520px;
+      background: white;
+      box-shadow: -8px 0 40px rgba(0,0,0,0.12);
+      display: flex; flex-direction: column;
+      transform: translateX(100%);
+      transition: transform 0.3s cubic-bezier(0.25,0.46,0.45,0.94);
+      z-index: 200;
+      border-left: 1px solid #e2e8f0;
+    }
+    #sidebar.open { transform: translateX(0); }
+    #sidebar-overlay {
+      position: fixed; inset: 0;
+      background: rgba(15,23,42,0.4); backdrop-filter: blur(2px);
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.3s ease; z-index: 199;
+    }
+    #sidebar-overlay.open { opacity: 1; pointer-events: all; }
+
+    ::-webkit-scrollbar { height: 4px; width: 4px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+
+    .fade-in { animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:none} }
+
+    .text-accent { color: #113695; }
+    .tab-active  { background: white; color: #0f172a; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .pulse-dot { animation: pulse 1.5s ease infinite; }
+
+    input[type="date"]::-webkit-calendar-picker-indicator { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="min-h-screen flex items-center justify-center">
+      <div class="flex items-center gap-3 text-slate-400 mono text-sm">
+        <div class="w-2 h-2 rounded-full bg-blue-600 pulse-dot"></div>
+        Carregando...
+      </div>
+    </div>
+  </div>
+
+  <div id="sidebar-overlay" onclick="closeSidebar()"></div>
+  <div id="sidebar"><div id="sidebar-inner" class="flex flex-col h-full"></div></div>
+  <div id="modal-root"></div>
+
+  <script type="module">
+    // ═══════════════════════════════════════════════════════
+    // FIREBASE
+    // ═══════════════════════════════════════════════════════
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js';
+    import {
+      getFirestore, doc, getDoc, setDoc, deleteDoc, addDoc,
+      onSnapshot, collection, query, orderBy, limit, getDocs, writeBatch
+    } from 'https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js';
+
+    const FIREBASE_CONFIG = {
+      apiKey:            "AIzaSyCekYnmfm9A8ZVAwoxUQePzRLg7mWjvTrk",
+      authDomain:        "farol-de-entregas.firebaseapp.com",
+      projectId:         "farol-de-entregas",
+      storageBucket:     "farol-de-entregas.firebasestorage.app",
+      messagingSenderId: "356609641589",
+      appId:             "1:356609641589:web:0fbe3c548f21d4f004bc3c",
+    };
+    const app = initializeApp(FIREBASE_CONFIG);
+    const db  = getFirestore(app);
+
+    // ═══════════════════════════════════════════════════════
+    // SENHA
+    // ═══════════════════════════════════════════════════════
+    // Guarda só o hash da senha (PBKDF2-SHA256), nunca a senha. Gerar com gerar-hash-senha.html.
+    const SENHA_SALT = "a582a2b1d37c19c539198008f388822f";
+    const SENHA_ITER = 200000;
+    const SENHA_HASH = "c5f6e0e5507d99c757161888ecdd7ad0364a4b06e89bc77c0e3be9a96958ad8f";
+    async function hashSenha(pwd) {
+      const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pwd), 'PBKDF2', false, ['deriveBits']);
+      const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(SENHA_SALT), iterations: SENHA_ITER }, key, 256);
+      return Array.from(new Uint8Array(bits)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DADOS INICIAIS (seed no primeiro acesso)
+    // ═══════════════════════════════════════════════════════
+    const SEED_PROJECTS = [
+      { id:'p1',  name:'Parque dos Ingleses Liverpool', type:'Gerenciamento', order:1  },
+      { id:'p2',  name:'Parque dos Ingleses Londres',   type:'Gerenciamento', order:2  },
+      { id:'p3',  name:'Maison',                        type:'Gerenciamento', order:3  },
+      { id:'p4',  name:'Botanica',                      type:'Gerenciamento', order:4  },
+      { id:'p5',  name:'Be Garden',                     type:'Gerenciamento', order:5  },
+      { id:'p6',  name:'Be Bonifacio',                  type:'Gerenciamento', order:6  },
+      { id:'p7',  name:'Inside',                        type:'Gerenciamento', order:7  },
+      { id:'p8',  name:'Blend',                         type:'Gerenciamento', order:8  },
+      { id:'p9',  name:'Santa Inês',                    type:'Gerenciamento', order:9  },
+      { id:'p10', name:'Guaya Resid. Clube',            type:'Gerenciamento', order:10 },
+      { id:'p11', name:'Villa Mercedez',                type:'Gerenciamento', order:11 },
+      { id:'p12', name:'Aura Home Club',                type:'Construção',    order:12 },
+      { id:'p13', name:'Golden Dolphin',                type:'Construção',    order:13 },
+      { id:'p14', name:'Villa Jardim',                  type:'Construção',    order:14 },
+      { id:'p15', name:'Flamboyant',                    type:'Construção',    order:15 },
+      { id:'p16', name:'Jd. Roma',                      type:'Construção',    order:16 },
+      { id:'p17', name:'Yvy Home',                      type:'Construção',    order:17 },
+      { id:'p18', name:'Seazone Meirelles',             type:'Construção',    order:18 },
+      { id:'p19', name:'Seazone Cachoeira',             type:'Construção',    order:19 },
+      { id:'p20', name:'Seazone Marista 144',           type:'Construção',    order:20 },
+      { id:'p21', name:'Seazone Bonito',                type:'Construção',    order:21 },
+      { id:'p22', name:'Seazone Santinho',              type:'Construção',    order:22 },
+      { id:'p23', name:'Seazone Caraguatatuba',         type:'Construção',    order:23 },
+      { id:'p24', name:'Seazone Bonito II',             type:'Construção',    order:24 },
+      { id:'p25', name:'Seazone Foz',                   type:'Construção',    order:25 },
+      { id:'p26', name:'Seazone Canas Beach',           type:'Construção',    order:26 },
+      { id:'p27', name:'Seazone Barra Grande',          type:'Construção',    order:27 },
+      { id:'p28', name:'Seazone Natal',                 type:'Construção',    order:28 },
+    ];
+    const SEED_DELIVERIES = [
+      { id:'d1',  kr:'KR1', name:'REL. MENSAL',    full:'Envio Relatório Mensal',            order:1  },
+      { id:'d2',  kr:'KR1', name:'REP. SEM. 1',    full:'Report Semanal 1',                  order:2  },
+      { id:'d3',  kr:'KR1', name:'REP. SEM. 2',    full:'Report Semanal 2',                  order:3  },
+      { id:'d4',  kr:'KR1', name:'REP. SEM. 3',    full:'Report Semanal 3',                  order:4  },
+      { id:'d5',  kr:'KR1', name:'REP. SEM. 4',    full:'Report Semanal 4',                  order:5  },
+      { id:'d6',  kr:'KR2', name:'ATA SEM. 1',     full:'Ata Semanal 1',                     order:6  },
+      { id:'d7',  kr:'KR2', name:'ATA SEM. 2',     full:'Ata Semanal 2',                     order:7  },
+      { id:'d8',  kr:'KR2', name:'ATA SEM. 3',     full:'Ata Semanal 3',                     order:8  },
+      { id:'d9',  kr:'KR2', name:'ATA SEM. 4',     full:'Ata Semanal 4',                     order:9  },
+      { id:'d10', kr:'KR2', name:'ATA MENSAL',     full:'Ata Mensal',                        order:10 },
+      { id:'d11', kr:'KR2', name:'REL. SST',       full:'Relatório SST',                     order:11 },
+      { id:'d12', kr:'KR2', name:'CHECKLIST 360',  full:'Checklist 360',                     order:12 },
+      { id:'d13', kr:'KR2', name:'LINHA BALANÇO',  full:'Gestão à Vista — Linha de Balanço', order:13 },
+      { id:'d14', kr:'KR2', name:'FAROL CONT.',    full:'Gestão à Vista — Farol de Controle', order:14 },
+      { id:'d15', kr:'KR2', name:'PROG. SEMANAL',  full:'Gestão à Vista — Prog. Semanal',    order:15 },
+    ];
+    const SEED_GROUPS = [
+      { id:'g1', name:'KR1', color:'blue',   order:1 },
+      { id:'g2', name:'KR2', color:'indigo', order:2 },
+    ];
+
+    // Paleta usada para atribuir cor automaticamente a novos grupos (KR3, Vistoria, etc.)
+    const GROUP_COLOR_PALETTE = ['blue','indigo','emerald','amber','rose','violet','cyan','pink','teal','orange','fuchsia','lime'];
+    function nextAutoColor() {
+      const used = new Set(S.groups.map(g => g.color));
+      return GROUP_COLOR_PALETTE.find(c => !used.has(c)) || GROUP_COLOR_PALETTE[S.groups.length % GROUP_COLOR_PALETTE.length];
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // ESTADO
+    // ═══════════════════════════════════════════════════════
+    const S = {
+      isEditor:        false,
+      sectorFilter:    'All',
+      showLateOnly:    false,
+      view:            'matrix', // 'matrix' | 'dashboard'
+      dashExpanded:    { projects: false, deliveries: false },
+      sidebarOpen:     false,
+      sidebarTab:      'timeline',
+      sidebarSearch:   '',
+      projects:        [],
+      deliveries:      [],
+      groups:          [],
+      periods:         [],
+      currentPeriodId: null,
+      period:          null,
+      statuses:        {},
+      history:         [],
+      snapshots:       [],
+      lastUpdate:      null,
+      loaded:          { projects: false, deliveries: false, groups: false },
+    };
+
+    function getGroup(name) { return S.groups.find(g => g.name === name); }
+    function groupColor(name) { return getGroup(name)?.color || 'slate'; }
+    // Agrupa as entregas na ordem dos grupos configurados; entregas cujo grupo foi removido
+    // caem em "Outros" para nunca ficarem escondidas silenciosamente.
+    function groupedDeliveries() {
+      const usedNames = new Set(S.groups.map(g => g.name));
+      const known = S.groups
+        .map(g => ({ group: g, items: S.deliveries.filter(d => d.kr === g.name) }))
+        .filter(k => k.items.length > 0);
+      const orphans = S.deliveries.filter(d => !usedNames.has(d.kr));
+      if (orphans.length) known.push({ group: { id: '_orphan', name: 'Outros', color: 'slate' }, items: orphans });
+      return known;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // STATUS LOGIC
+    // ═══════════════════════════════════════════════════════
+    function getStatus(pId, dId) {
+      if (!S.period) return 'na';
+      const inScope = (S.period.scope?.[pId] || []).includes(dId);
+      if (!inScope) return 'na';
+      const st = S.statuses[`${S.currentPeriodId}_${pId}_${dId}`];
+      if (st) return st.variant === 'warn' ? 'delivered_warn' : 'delivered';
+      const dl = S.period.deliveries?.[dId];
+      if (dl && new Date(dl + 'T23:59:59') < new Date()) return 'late';
+      return 'pending';
+    }
+
+    // OK verde ('delivered') e OK amarelo ('delivered_warn') contam como entregue.
+    const isDone = s => s === 'delivered' || s === 'delivered_warn';
+
+    function calcTotals(projectList) {
+      const ps = projectList || S.projects;
+      const ds = S.deliveries;
+      let meta = 0, delivered = 0, late = 0;
+      for (const p of ps) for (const d of ds) {
+        const s = getStatus(p.id, d.id);
+        if (s !== 'na') meta++;
+        if (isDone(s)) delivered++;
+        if (s === 'late') late++;
+      }
+      return { meta, delivered, late, pending: meta - delivered - late,
+               pct: meta > 0 ? Math.round((delivered / meta) * 100) : 0 };
+    }
+
+    function colSummary(dId, projects) {
+      let meta = 0, delivered = 0;
+      for (const p of projects) {
+        const s = getStatus(p.id, dId);
+        if (s !== 'na') meta++;
+        if (isDone(s)) delivered++;
+      }
+      return { meta, delivered, pct: meta > 0 ? Math.round((delivered / meta) * 100) : 0 };
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // FIREBASE — OPERAÇÕES
+    // ═══════════════════════════════════════════════════════
+    async function toggleDelivery(pId, dId) {
+      const status = getStatus(pId, dId);
+      if (status === 'na') return;
+      const key = `${S.currentPeriodId}_${pId}_${dId}`;
+      const ref = doc(db, 'statuses', key);
+      const proj = S.projects.find(p => p.id === pId);
+      const deliv = S.deliveries.find(d => d.id === dId);
+
+      // Ciclo: pendente/atrasado → OK verde → OK amarelo → desmarcado
+      if (status === 'delivered') {
+        await setDoc(ref, { periodId: S.currentPeriodId, projectId: pId, deliveryId: dId, deliveredAt: Date.now(), variant: 'warn' });
+        await addDoc(collection(db, 'history'), {
+          periodId: S.currentPeriodId,
+          projectId: pId, projectName: proj?.name || pId,
+          deliveryId: dId, deliveryName: deliv?.name || dId,
+          action: 'delivered_warn', changedAt: Date.now(),
+        });
+      } else if (status === 'delivered_warn') {
+        await deleteDoc(ref);
+        await addDoc(collection(db, 'history'), {
+          periodId: S.currentPeriodId,
+          projectId: pId, projectName: proj?.name || pId,
+          deliveryId: dId, deliveryName: deliv?.name || dId,
+          action: 'undelivered', changedAt: Date.now(),
+        });
+      } else {
+        await setDoc(ref, { periodId: S.currentPeriodId, projectId: pId, deliveryId: dId, deliveredAt: Date.now() });
+        await addDoc(collection(db, 'history'), {
+          periodId: S.currentPeriodId,
+          projectId: pId, projectName: proj?.name || pId,
+          deliveryId: dId, deliveryName: deliv?.name || dId,
+          action: 'delivered', changedAt: Date.now(),
+        });
+      }
+      scheduleDailySnapshot();
+    }
+
+    async function savePeriod(data) { await setDoc(doc(db, 'periods', data.id), data); }
+
+    async function takeDailySnapshot(label, isWeekly) {
+      if (!S.period) return;
+      const today = new Date().toISOString().split('T')[0];
+      const key   = isWeekly ? `${S.currentPeriodId}_w_${label.replace(/\s/g,'_')}` : `${S.currentPeriodId}_${today}`;
+      const { meta, delivered, late, pct } = calcTotals();
+      await setDoc(doc(db, 'snapshots', key), {
+        date: today, periodId: S.currentPeriodId,
+        totalMeta: meta, delivered, late, percent: pct,
+        isWeekly: !!isWeekly, weekName: label || null,
+      });
+    }
+
+    let snapshotTimer = null;
+    function scheduleDailySnapshot() {
+      clearTimeout(snapshotTimer);
+      snapshotTimer = setTimeout(() => takeDailySnapshot(null, false), 2000);
+    }
+
+    async function saveProject(p)  { await setDoc(doc(db, 'projects', p.id), p); }
+    async function removeProject(id) { await deleteDoc(doc(db, 'projects', id)); }
+    async function saveDelivery(d) { await setDoc(doc(db, 'deliveries', d.id), d); }
+    async function removeDelivery(id) { await deleteDoc(doc(db, 'deliveries', id)); }
+    async function saveGroup(g)    { await setDoc(doc(db, 'groups', g.id), g); }
+    async function removeGroup(id) { await deleteDoc(doc(db, 'groups', id)); }
+
+    // ═══════════════════════════════════════════════════════
+    // SEED — escreve dados iniciais se Firestore estiver vazio
+    // ═══════════════════════════════════════════════════════
+    async function seedIfEmpty() {
+      const [ps, ds, gs] = await Promise.all([
+        getDocs(collection(db, 'projects')),
+        getDocs(collection(db, 'deliveries')),
+        getDocs(collection(db, 'groups')),
+      ]);
+      if (ps.empty) {
+        const batch = writeBatch(db);
+        SEED_PROJECTS.forEach(p => batch.set(doc(db, 'projects', p.id), p));
+        await batch.commit();
+      }
+      if (ds.empty) {
+        const batch = writeBatch(db);
+        SEED_DELIVERIES.forEach(d => batch.set(doc(db, 'deliveries', d.id), d));
+        await batch.commit();
+      }
+      if (gs.empty) {
+        const batch = writeBatch(db);
+        SEED_GROUPS.forEach(g => batch.set(doc(db, 'groups', g.id), g));
+        await batch.commit();
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // LISTENERS
+    // ═══════════════════════════════════════════════════════
+    let unsubProjects = null, unsubDeliveries = null, unsubPeriods = null;
+    let unsubStatuses = null, unsubHistory = null, unsubSnapshots = null, unsubGroups = null;
+
+    function startListeners() {
+      unsubProjects?.();
+      unsubProjects = onSnapshot(query(collection(db, 'projects'), orderBy('order', 'asc')), snap => {
+        S.projects = snap.docs.map(d => d.data());
+        S.loaded.projects = true;
+        renderIfReady();
+      });
+
+      unsubDeliveries?.();
+      unsubDeliveries = onSnapshot(query(collection(db, 'deliveries'), orderBy('order', 'asc')), snap => {
+        S.deliveries = snap.docs.map(d => d.data());
+        S.loaded.deliveries = true;
+        renderIfReady();
+      });
+
+      unsubGroups?.();
+      unsubGroups = onSnapshot(query(collection(db, 'groups'), orderBy('order', 'asc')), snap => {
+        S.groups = snap.docs.map(d => d.data());
+        S.loaded.groups = true;
+        renderIfReady();
+      });
+
+      unsubPeriods?.();
+      unsubPeriods = onSnapshot(collection(db, 'periods'), snap => {
+        S.periods = snap.docs.map(d => d.data())
+          .sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+        const primary = S.periods.find(p => p.isPrimary);
+        if (!S.isEditor) {
+          S.currentPeriodId = primary?.id ?? S.periods[0]?.id ?? null;
+        } else if (!S.currentPeriodId) {
+          S.currentPeriodId = primary?.id ?? S.periods[0]?.id ?? null;
+        }
+        S.period = S.periods.find(p => p.id === S.currentPeriodId) ?? null;
+        renderIfReady();
+        refreshSnapshots();
+      });
+
+      unsubStatuses?.();
+      unsubStatuses = onSnapshot(collection(db, 'statuses'), snap => {
+        S.statuses = {};
+        snap.docs.forEach(d => { S.statuses[d.id] = d.data(); });
+        patchCells();
+        if (S.sidebarOpen) renderSidebar();
+      });
+
+      unsubHistory?.();
+      unsubHistory = onSnapshot(
+        query(collection(db, 'history'), orderBy('changedAt', 'desc'), limit(200)),
+        snap => {
+          S.history = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          S.lastUpdate = S.history[0] ?? null;
+          if (S.sidebarOpen && S.sidebarTab === 'timeline') renderSidebar();
+        }
+      );
+    }
+
+    function refreshSnapshots() {
+      if (!S.currentPeriodId) return;
+      unsubSnapshots?.();
+      unsubSnapshots = onSnapshot(
+        query(collection(db, 'snapshots'), orderBy('date', 'asc')),
+        snap => {
+          S.snapshots = snap.docs.map(d => d.data())
+            .filter(s => s.periodId === S.currentPeriodId);
+          if (S.sidebarOpen && S.sidebarTab === 'charts') renderSidebar();
+        }
+      );
+    }
+
+    function switchPeriod(id) {
+      S.currentPeriodId = id;
+      S.period = S.periods.find(p => p.id === id) ?? null;
+      refreshSnapshots();
+      render();
+    }
+
+    function renderIfReady() {
+      if (S.loaded.projects && S.loaded.deliveries && S.loaded.groups) render();
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // SENHA
+    // ═══════════════════════════════════════════════════════
+    function initEditor() { S.isEditor = !!SENHA_HASH && localStorage.getItem('farol_auth') === SENHA_HASH; }
+
+    function showPasswordModal() {
+      setModal(`
+        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
+          <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm border border-slate-200 fade-in overflow-hidden">
+            <div class="p-6">
+              <div class="flex items-center gap-3 mb-6">
+                <div class="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center">🔒</div>
+                <h3 class="text-xl font-bold text-slate-800">Modo edição</h3>
+              </div>
+              <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Senha de Acesso</label>
+              <input id="pwd-input" type="password" placeholder="••••••"
+                class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none mono tracking-widest focus:border-blue-500 focus:ring-4 focus:ring-blue-50 transition-all mb-1"
+                onkeydown="if(event.key==='Enter') window._submitPwd()">
+              <p id="pwd-err" class="mono text-[10px] font-bold text-rose-500 uppercase tracking-wider hidden mb-3">Senha incorreta.</p>
+              <div class="flex gap-2 mt-4">
+                <button onclick="closeModal()" class="flex-1 px-4 py-3 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 uppercase tracking-wider">Cancelar</button>
+                <button onclick="window._submitPwd()" class="flex-1 px-4 py-3 bg-slate-900 hover:bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-colors">Acessar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+      setTimeout(() => document.getElementById('pwd-input')?.focus(), 50);
+      window._submitPwd = async () => {
+        const val = document.getElementById('pwd-input').value;
+        const h = await hashSenha(val);
+        if (SENHA_HASH && h === SENHA_HASH) {
+          localStorage.setItem('farol_auth', h);
+          S.isEditor = true; closeModal(); render();
+        } else {
+          document.getElementById('pwd-err').classList.remove('hidden');
+          document.getElementById('pwd-input').value = '';
+          document.getElementById('pwd-input').focus();
+        }
+      };
+    }
+    function logout() { localStorage.removeItem('farol_auth'); S.isEditor = false; render(); }
+
+    // ═══════════════════════════════════════════════════════
+    // MODAL PERÍODO
+    // ═══════════════════════════════════════════════════════
+    function showSetupModal(existing) {
+      const isNew = !existing;
+      const p = existing ? { ...existing } : {
+        id: `per_${Date.now()}`, name: '', startDate: '', endDate: '',
+        deliveries: {}, scope: {},
+      };
+      if (isNew) {
+        S.projects.forEach(proj => { p.scope[proj.id] = []; });
+      }
+      // Novo período: já nasce copiando o escopo do período mais recente (os prazos não são copiados)
+      const periodsByRecent = [...S.periods].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+      const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+      const suggestFrom = src => {
+        const [y, m] = (src?.startDate || '').split('-').map(Number);
+        if (!y || !m) return { name: '', startDate: '', endDate: '' };
+        const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1; // nm é 1 a 12
+        const pad = n => String(n).padStart(2, '0');
+        return {
+          name: `${MESES[nm - 1]} ${ny}`,
+          startDate: `${ny}-${pad(nm)}-01`,
+          endDate: `${ny}-${pad(nm)}-${pad(new Date(ny, nm, 0).getDate())}`,
+        };
+      };
+      const scopeFrom = src => {
+        const sc = {};
+        S.projects.forEach(proj => { sc[proj.id] = [...(src?.scope?.[proj.id] || [])]; });
+        return sc;
+      };
+      if (isNew && periodsByRecent.length) {
+        const first = periodsByRecent[0];
+        Object.assign(p, suggestFrom(first), { scope: scopeFrom(first) });
+      }
+      let lastSuggestion = isNew ? { name: p.name, startDate: p.startDate, endDate: p.endDate } : null;
+      const groups = groupedDeliveries();
+
+      setModal(`
+        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
+          <div class="bg-white rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 fade-in">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <h2 class="text-lg font-bold text-slate-900">${isNew ? 'Novo período' : 'Editar período'}</h2>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+              ${isNew && periodsByRecent.length ? `
+                <div class="flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-3">
+                  <label class="mono text-[10px] font-bold text-blue-700 uppercase tracking-widest">Copiar escopo de</label>
+                  <select id="s-copy" onchange="window._copyFrom(this.value)"
+                    class="bg-white border border-blue-200 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-blue-500">
+                    ${periodsByRecent.map((pp, i) => `<option value="${pp.id}" ${i === 0 ? 'selected' : ''}>${pp.name}</option>`).join('')}
+                    <option value="">Nenhum (começar vazio)</option>
+                  </select>
+                  <span class="text-xs text-slate-500">Traz só as marcações de obra e entrega. Os prazos você preenche.</span>
+                </div>
+              ` : ''}
+              <div class="grid grid-cols-3 gap-4">
+                <div>
+                  <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Nome</label>
+                  <input id="s-name" value="${p.name}" placeholder="ex: Junho 2025"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
+                </div>
+                <div>
+                  <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Início</label>
+                  <input id="s-start" type="date" value="${p.startDate}"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
+                </div>
+                <div>
+                  <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Fim</label>
+                  <input id="s-end" type="date" value="${p.endDate}"
+                    class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
+                </div>
+              </div>
+
+              <div>
+                <h3 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Prazos das entregas</h3>
+                <div class="grid grid-cols-2 gap-x-8 gap-y-2.5">
+                  ${S.deliveries.map(d => `
+                    <div class="flex items-center gap-3">
+                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(d.kr)}-100 text-${groupColor(d.kr)}-700">${d.kr}</span>
+                      <span class="text-xs text-slate-500 flex-1 truncate">${d.full}</span>
+                      <input id="dl-${d.id}" type="date" value="${p.deliveries[d.id]||''}"
+                        class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs outline-none focus:border-blue-500 w-36">
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div>
+                <div class="flex items-center justify-between mb-3">
+                  <h3 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Escopo por obra</h3>
+                  <div class="flex gap-3 text-xs">
+                    <button onclick="window._toggleAll(true)" class="text-blue-600 hover:underline font-medium">Marcar todos</button>
+                    <button onclick="window._toggleAll(false)" class="text-slate-400 hover:underline">Desmarcar todos</button>
+                  </div>
+                </div>
+                <div class="overflow-x-auto border border-slate-100 rounded-xl">
+                  <table id="scope-table" class="text-xs border-collapse w-full" style="user-select:none">
+                    <thead>
+                      <tr class="bg-slate-50">
+                        <th class="text-left px-3 py-2 text-slate-400 font-medium sticky left-0 bg-slate-50 min-w-48">Obra</th>
+                        ${groups.map(({group, items}) => `
+                          <th colspan="${items.length}" class="text-center py-1.5 mono text-[9px] font-bold text-${group.color}-600 tracking-widest border-b border-${group.color}-100">${group.name}</th>
+                        `).join('')}
+                      </tr>
+                      <tr class="bg-slate-50 border-b border-slate-100">
+                        <th class="sticky left-0 bg-slate-50 px-3 py-1"></th>
+                        ${S.deliveries.map(d => `
+                          <th class="px-1 py-1 text-center cursor-pointer hover:bg-blue-50" style="min-width:44px" data-col="${d.id}" title="Clique para marcar ou desmarcar a coluna inteira">
+                            <span class="text-slate-400 font-normal" style="writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block;height:65px;font-size:9px">${d.name}</span>
+                          </th>
+                        `).join('')}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${['Gerenciamento','Construção'].flatMap(type => [
+                        `<tr><td colspan="${S.deliveries.length+1}" class="px-3 py-1 mono text-[9px] uppercase tracking-widest text-slate-400 bg-slate-50 font-bold">${type}</td></tr>`,
+                        ...S.projects.filter(pr=>pr.type===type).map(proj=>`
+                          <tr class="border-b border-slate-50 hover:bg-blue-50/30">
+                            <td class="sticky left-0 bg-white hover:bg-blue-50/30 px-3 py-1.5 text-slate-700 whitespace-nowrap font-medium cursor-pointer" data-row="${proj.id}" title="Clique para marcar ou desmarcar a linha inteira">${proj.name}</td>
+                            ${S.deliveries.map(d=>`
+                              <td class="px-1 py-1 text-center cursor-pointer" data-cell="sc-${proj.id}-${d.id}">
+                                <input type="checkbox" id="sc-${proj.id}-${d.id}" style="pointer-events:none"
+                                  ${(p.scope[proj.id]||[]).includes(d.id)?'checked':''}
+                                  class="w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer">
+                              </td>
+                            `).join('')}
+                          </tr>
+                        `)
+                      ]).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+            <div class="px-6 py-4 border-t border-slate-100 flex items-center justify-between">
+              ${!isNew?`
+                <div class="flex items-center gap-3">
+                  ${p.isPrimary
+                    ? `<span class="text-xs font-bold text-amber-600 flex items-center gap-1">⭐ Período principal</span>`
+                    : `<button onclick="window._setPrimary('${p.id}')" class="text-xs font-medium text-slate-500 hover:text-amber-600 transition-colors">⭐ Tornar principal</button>`
+                  }
+                  <button onclick="window._deletePeriod('${p.id}')" class="text-xs text-rose-500 hover:text-rose-700 font-medium">Excluir período</button>
+                </div>
+              `:'<span></span>'}
+              <div class="flex gap-2">
+                <button onclick="closeModal()" class="px-5 py-2.5 text-sm border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50">Cancelar</button>
+                <button onclick="window._savePeriod('${p.id}')" class="px-5 py-2.5 text-sm bg-slate-900 hover:bg-blue-600 text-white rounded-xl font-semibold transition-colors shadow-lg">Salvar período</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+
+      window._copyFrom = srcId => {
+        const src = S.periods.find(x => x.id === srcId);
+        const sc = scopeFrom(src);
+        S.projects.forEach(pr => S.deliveries.forEach(d => {
+          const el = document.getElementById(`sc-${pr.id}-${d.id}`);
+          if (el) el.checked = sc[pr.id].includes(d.id);
+        }));
+        // Só troca nome e datas se ainda forem a última sugestão (ou estiverem vazios)
+        const sug = src ? suggestFrom(src) : { name: '', startDate: '', endDate: '' };
+        [['s-name', 'name'], ['s-start', 'startDate'], ['s-end', 'endDate']].forEach(([elId, k]) => {
+          const el = document.getElementById(elId);
+          if (el && (!el.value || el.value === lastSuggestion[k])) el.value = sug[k];
+        });
+        lastSuggestion = sug;
+      };
+      // Clicar e arrastar: a primeira célula define o estado (marcar ou desmarcar) aplicado às demais
+      {
+        const table = document.getElementById('scope-table');
+        const box = id => document.getElementById(id);
+        let painting = null; // true/false enquanto o mouse está pressionado
+        const paint = td => { const el = td && box(td.dataset.cell); if (el) el.checked = painting; };
+        const toggleGroup = ids => {
+          const els = ids.map(box).filter(Boolean);
+          const all = els.every(e => e.checked);
+          els.forEach(e => { e.checked = !all; });
+        };
+        table.addEventListener('mousedown', e => {
+          if (e.button !== 0) return;
+          const cell = e.target.closest('[data-cell]');
+          if (cell) {
+            painting = !box(cell.dataset.cell).checked;
+            paint(cell);
+            e.preventDefault();
+            return;
+          }
+          const row = e.target.closest('[data-row]');
+          if (row) toggleGroup(S.deliveries.map(d => `sc-${row.dataset.row}-${d.id}`));
+          const col = e.target.closest('[data-col]');
+          if (col) toggleGroup(S.projects.map(pr => `sc-${pr.id}-${col.dataset.col}`));
+        });
+        // Percorre a reta entre duas posições do mouse, para não pular células em movimentos rápidos
+        let last = null;
+        const paintLine = (x0, y0, x1, y1) => {
+          const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
+          for (let i = 1; i <= steps; i++) {
+            const el = document.elementFromPoint(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+            paint(el && el.closest('[data-cell]'));
+          }
+        };
+        table.addEventListener('mousedown', e => { last = { x: e.clientX, y: e.clientY }; });
+        document.addEventListener('mousemove', e => {
+          if (painting === null || !last) return;
+          paintLine(last.x, last.y, e.clientX, e.clientY);
+          last = { x: e.clientX, y: e.clientY };
+        });
+        document.addEventListener('mouseup', () => { painting = null; last = null; });
+      }
+      window._toggleAll = v => S.projects.forEach(pr => S.deliveries.forEach(d => {
+        const el = document.getElementById(`sc-${pr.id}-${d.id}`); if (el) el.checked = v;
+      }));
+      window._savePeriod = async id => {
+        const name = document.getElementById('s-name').value.trim();
+        const startDate = document.getElementById('s-start').value;
+        const endDate   = document.getElementById('s-end').value;
+        if (!name||!startDate||!endDate) { alert('Preencha nome, início e fim.'); return; }
+        const deliveries = {};
+        S.deliveries.forEach(d => { const v = document.getElementById(`dl-${d.id}`)?.value; if(v) deliveries[d.id]=v; });
+        const scope = {};
+        S.projects.forEach(pr => { scope[pr.id] = S.deliveries.filter(d=>document.getElementById(`sc-${pr.id}-${d.id}`)?.checked).map(d=>d.id); });
+        // Mantém a estrela de período principal (setDoc regrava o documento inteiro)
+        const isPrimary = !!S.periods.find(x => x.id === id)?.isPrimary;
+        await savePeriod({ id, name, startDate, endDate, deliveries, scope, isPrimary });
+        S.currentPeriodId = id; closeModal(); scheduleDailySnapshot();
+      };
+      window._deletePeriod = async id => {
+        if (!confirm('Excluir período?')) return;
+        await deleteDoc(doc(db,'periods',id)); closeModal();
+      };
+      window._setPrimary = async id => {
+        const batch = writeBatch(db);
+        S.periods.forEach(p => {
+          batch.set(doc(db,'periods',p.id), { ...p, isPrimary: p.id === id });
+        });
+        await batch.commit();
+        closeModal();
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // MODAL ADMIN (obras e entregas)
+    // ═══════════════════════════════════════════════════════
+    function showAdminModal(tab = 'projects') {
+      // Contadores locais de ordem — evitam colisão quando o listener do
+      // Firestore ainda não refletiu o item recém-criado (S.projects/S.deliveries/S.groups desatualizados).
+      let nextProjOrder  = Math.max(...S.projects.map(p => p.order || 0), 0);
+      let nextDelOrder   = Math.max(...S.deliveries.map(d => d.order || 0), 0);
+      let nextGroupOrder = Math.max(...S.groups.map(g => g.order || 0), 0);
+      let dragItem = null; // { kind: 'project'|'delivery'|'group', id }
+      let editingProjId  = null;
+      let editingDelId   = null;
+      let editingGroupId = null;
+
+      const renderAdmin = (activeTab) => `
+        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
+          <div class="bg-white rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 fade-in">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+              <h2 class="text-lg font-bold text-slate-900">Administração</h2>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+            </div>
+            <div class="flex bg-slate-100 m-4 p-1 rounded-xl gap-1">
+              <button onclick="window._adminTab('projects')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='projects'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏗️ Obras (${S.projects.length})</button>
+              <button onclick="window._adminTab('deliveries')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='deliveries'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">📋 Entregas (${S.deliveries.length})</button>
+              <button onclick="window._adminTab('groups')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='groups'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏷️ Grupos (${S.groups.length})</button>
+            </div>
+            <div class="flex-1 overflow-y-auto px-4 pb-4">
+              ${activeTab === 'projects' ? `
+                <p class="text-[11px] text-slate-400 mb-2">Arraste ⠿ para reordenar as linhas da matriz.</p>
+                <div class="space-y-1.5 mb-4">
+                  ${S.projects.map(p => p.id === editingProjId ? `
+                    <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                      <input id="edit-proj-name-${p.id}" value="${p.name}"
+                        class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                        onkeydown="if(event.key==='Enter') window._saveProjectEdit('${p.id}'); if(event.key==='Escape') window._cancelEdit();">
+                      <select id="edit-proj-type-${p.id}" class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                        <option value="Gerenciamento" ${p.type==='Gerenciamento'?'selected':''}>Gerenciamento</option>
+                        <option value="Construção" ${p.type==='Construção'?'selected':''}>Construção</option>
+                      </select>
+                      <button onclick="window._saveProjectEdit('${p.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                      <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                    </div>
+                  ` : `
+                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                      draggable="true" data-admin-drag="project" data-id="${p.id}">
+                      <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
+                      <span class="flex-1 text-sm font-medium text-slate-700">${p.name}</span>
+                      <span class="mono text-[10px] px-2 py-0.5 rounded ${p.type==='Gerenciamento'?'bg-blue-100 text-blue-700':'bg-amber-100 text-amber-700'}">${p.type}</span>
+                      <button onclick="window._editProject('${p.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
+                      <button onclick="window._removeProject('${p.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+                    </div>
+                  `).join('')}
+                </div>
+                <div class="border-t border-slate-100 pt-4">
+                  <h4 class="mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Adicionar obra</h4>
+                  <div class="flex gap-2">
+                    <input id="new-proj-name" placeholder="Nome da obra" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
+                    <select id="new-proj-type" class="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
+                      <option value="Gerenciamento">Gerenciamento</option>
+                      <option value="Construção">Construção</option>
+                    </select>
+                    <button onclick="window._addProject()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
+                  </div>
+                </div>
+              ` : activeTab === 'deliveries' ? `
+                <p class="text-[11px] text-slate-400 mb-2">Arraste ⠿ para reordenar as colunas da matriz (dentro do mesmo grupo). Grupos são criados na aba 🏷️ Grupos.</p>
+                ${S.groups.map(g => `
+                  <div class="mb-3">
+                    <div class="mono text-[9px] font-bold uppercase tracking-widest text-${g.color}-600 px-1 mb-1.5">${g.name}</div>
+                    <div class="space-y-1.5">
+                      ${S.deliveries.filter(d=>d.kr===g.name).map(d => d.id === editingDelId ? `
+                        <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                          <input id="edit-del-full-${d.id}" value="${d.full}" placeholder="Nome completo"
+                            class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                            onkeydown="if(event.key==='Enter') window._saveDeliveryEdit('${d.id}'); if(event.key==='Escape') window._cancelEdit();">
+                          <input id="edit-del-name-${d.id}" value="${d.name}" placeholder="Abreviação"
+                            class="w-40 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs mono outline-none focus:border-blue-500"
+                            onkeydown="if(event.key==='Enter') window._saveDeliveryEdit('${d.id}'); if(event.key==='Escape') window._cancelEdit();">
+                          <select id="edit-del-kr-${d.id}" class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                            ${S.groups.map(gr => `<option value="${gr.name}" ${d.kr===gr.name?'selected':''}>${gr.name}</option>`).join('')}
+                          </select>
+                          <button onclick="window._saveDeliveryEdit('${d.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                          <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                        </div>
+                      ` : `
+                        <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                          draggable="true" data-admin-drag="delivery" data-id="${d.id}">
+                          <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
+                          <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${g.color}-100 text-${g.color}-700">${d.kr}</span>
+                          <span class="flex-1 text-sm font-medium text-slate-700">${d.full}</span>
+                          <span class="mono text-[10px] text-slate-400">${d.name}</span>
+                          <button onclick="window._editDelivery('${d.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
+                          <button onclick="window._removeDelivery('${d.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+                `).join('')}
+                <div class="border-t border-slate-100 pt-4">
+                  <h4 class="mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Adicionar entrega</h4>
+                  <div class="grid grid-cols-2 gap-2 mb-2">
+                    <input id="new-del-name" placeholder="Abreviação (ex: REL. MENSAL)" class="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
+                    <input id="new-del-full" placeholder="Nome completo" class="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
+                  </div>
+                  <div class="flex gap-2">
+                    <select id="new-del-kr" class="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500">
+                      ${S.groups.map(g => `<option value="${g.name}">${g.name}</option>`).join('')}
+                    </select>
+                    <button onclick="window._addDelivery()" class="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
+                  </div>
+                </div>
+              ` : `
+                <p class="text-[11px] text-slate-400 mb-2">Grupos organizam as entregas em colunas (ex: KR1, KR2, Vistoria). Arraste ⠿ para reordenar.</p>
+                <div class="space-y-1.5 mb-4">
+                  ${S.groups.map(g => g.id === editingGroupId ? `
+                    <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                      <span id="group-color-dot-${g.id}" class="w-4 h-4 rounded-full inline-block bg-${g.color}-500 border border-white shadow shrink-0"></span>
+                      <input id="edit-group-name-${g.id}" value="${g.name}"
+                        class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
+                        onkeydown="if(event.key==='Enter') window._saveGroupEdit('${g.id}'); if(event.key==='Escape') window._cancelEdit();">
+                      <select id="edit-group-color-${g.id}"
+                        onchange="document.getElementById('group-color-dot-${g.id}').className='w-4 h-4 rounded-full inline-block bg-'+this.value+'-500 border border-white shadow shrink-0'"
+                        class="bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs outline-none focus:border-blue-500">
+                        ${GROUP_COLOR_PALETTE.map(c => `<option value="${c}" ${g.color===c?'selected':''}>${c}</option>`).join('')}
+                      </select>
+                      <button onclick="window._saveGroupEdit('${g.id}')" class="text-emerald-600 hover:text-emerald-700 text-lg leading-none" title="Salvar">✓</button>
+                      <button onclick="window._cancelEdit()" class="text-slate-400 hover:text-slate-600 text-lg leading-none" title="Cancelar">✕</button>
+                    </div>
+                  ` : `
+                    <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl hover:bg-slate-100 transition-colors"
+                      draggable="true" data-admin-drag="group" data-id="${g.id}">
+                      <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
+                      <span class="w-4 h-4 rounded-full inline-block bg-${g.color}-500 border border-white shadow shrink-0"></span>
+                      <span class="flex-1 text-sm font-medium text-slate-700">${g.name}</span>
+                      <span class="mono text-[10px] text-slate-400">${S.deliveries.filter(d=>d.kr===g.name).length} entrega(s)</span>
+                      <button onclick="window._editGroup('${g.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
+                      <button onclick="window._removeGroup('${g.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
+                    </div>
+                  `).join('')}
+                </div>
+                <div class="border-t border-slate-100 pt-4">
+                  <h4 class="mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Adicionar grupo</h4>
+                  <div class="flex gap-2">
+                    <input id="new-group-name" placeholder="Nome do grupo (ex: KR3, Vistoria)" class="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm outline-none focus:border-blue-500"
+                      onkeydown="if(event.key==='Enter') window._addGroup();">
+                    <button onclick="window._addGroup()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-medium transition-colors">+ Adicionar</button>
+                  </div>
+                  <p class="text-[10px] text-slate-400 mt-2">A cor é escolhida automaticamente; edite ✎ depois se quiser trocar.</p>
+                </div>
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+
+      setModal(renderAdmin(tab));
+      attachAdminDragEvents(tab);
+
+      function attachAdminDragEvents(activeTab) {
+        document.querySelectorAll('[data-admin-drag]').forEach(row => {
+          row.addEventListener('dragstart', () => {
+            dragItem = { kind: row.dataset.adminDrag, id: row.dataset.id };
+            row.classList.add('opacity-40');
+          });
+          row.addEventListener('dragend', () => row.classList.remove('opacity-40'));
+          row.addEventListener('dragover', e => e.preventDefault());
+          row.addEventListener('drop', async e => {
+            e.preventDefault();
+            const targetId = row.dataset.id;
+            const kind = row.dataset.adminDrag;
+            if (!dragItem || dragItem.kind !== kind || dragItem.id === targetId) return;
+            if (kind === 'project') await reorderProjects(dragItem.id, targetId);
+            else if (kind === 'delivery') await reorderDeliveries(dragItem.id, targetId);
+            else await reorderGroups(dragItem.id, targetId);
+            dragItem = null;
+            setModal(renderAdmin(activeTab));
+            attachAdminDragEvents(activeTab);
+          });
+        });
+      }
+
+      async function reorderProjects(draggedId, targetId) {
+        const arr = [...S.projects];
+        const from = arr.findIndex(p => p.id === draggedId);
+        const to   = arr.findIndex(p => p.id === targetId);
+        if (from < 0 || to < 0) return;
+        const [item] = arr.splice(from, 1);
+        arr.splice(to, 0, item);
+        const batch = writeBatch(db);
+        arr.forEach((p, i) => batch.set(doc(db, 'projects', p.id), { ...p, order: i + 1 }));
+        await batch.commit();
+        nextProjOrder = arr.length;
+      }
+
+      async function reorderGroups(draggedId, targetId) {
+        const arr = [...S.groups];
+        const from = arr.findIndex(g => g.id === draggedId);
+        const to   = arr.findIndex(g => g.id === targetId);
+        if (from < 0 || to < 0) return;
+        const [item] = arr.splice(from, 1);
+        arr.splice(to, 0, item);
+        const batch = writeBatch(db);
+        arr.forEach((g, i) => batch.set(doc(db, 'groups', g.id), { ...g, order: i + 1 }));
+        await batch.commit();
+        nextGroupOrder = arr.length;
+      }
+
+      async function reorderDeliveries(draggedId, targetId) {
+        const dragged = S.deliveries.find(d => d.id === draggedId);
+        const target  = S.deliveries.find(d => d.id === targetId);
+        if (!dragged || !target || dragged.kr !== target.kr) return; // restrito ao mesmo grupo
+        const group = S.deliveries.filter(d => d.kr === dragged.kr);
+        const from = group.findIndex(d => d.id === draggedId);
+        const to   = group.findIndex(d => d.id === targetId);
+        const [item] = group.splice(from, 1);
+        group.splice(to, 0, item);
+        // Reconstrói a lista completa preservando a ordem dos grupos (S.groups) com o
+        // grupo reordenado substituído — funciona para qualquer quantidade de grupos.
+        const merged = [];
+        S.groups.forEach(g => merged.push(...(g.name === dragged.kr ? group : S.deliveries.filter(d => d.kr === g.name))));
+        const knownNames = new Set(S.groups.map(g => g.name));
+        merged.push(...S.deliveries.filter(d => !knownNames.has(d.kr)));
+        const batch = writeBatch(db);
+        merged.forEach((d, i) => batch.set(doc(db, 'deliveries', d.id), { ...d, order: i + 1 }));
+        await batch.commit();
+        nextDelOrder = merged.length;
+      }
+
+      window._adminTab = (t) => { editingProjId = null; editingDelId = null; editingGroupId = null; setModal(renderAdmin(t)); attachAdminDragEvents(t); };
+      window._removeProject = async id => { if(confirm('Remover obra?')) { await removeProject(id); setModal(renderAdmin('projects')); attachAdminDragEvents('projects'); }};
+      window._removeDelivery = async id => { if(confirm('Remover entrega?')) { await removeDelivery(id); setModal(renderAdmin('deliveries')); attachAdminDragEvents('deliveries'); }};
+      window._removeGroup = async id => {
+        const group = S.groups.find(g => g.id === id);
+        const affected = S.deliveries.filter(d => d.kr === group.name).length;
+        if (affected > 0) { alert(`Não é possível remover: ${affected} entrega(s) usam o grupo "${group.name}". Edite essas entregas para outro grupo primeiro.`); return; }
+        if (!confirm('Remover grupo?')) return;
+        await removeGroup(id);
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
+      };
+      window._editProject = id => { editingProjId = id; setModal(renderAdmin('projects')); attachAdminDragEvents('projects'); document.getElementById(`edit-proj-name-${id}`)?.focus(); };
+      window._editDelivery = id => { editingDelId = id; setModal(renderAdmin('deliveries')); attachAdminDragEvents('deliveries'); document.getElementById(`edit-del-full-${id}`)?.focus(); };
+      window._editGroup = id => { editingGroupId = id; setModal(renderAdmin('groups')); attachAdminDragEvents('groups'); document.getElementById(`edit-group-name-${id}`)?.focus(); };
+      window._cancelEdit = () => {
+        const tab = editingGroupId !== null ? 'groups' : editingDelId !== null ? 'deliveries' : 'projects';
+        editingProjId = null; editingDelId = null; editingGroupId = null;
+        setModal(renderAdmin(tab));
+        attachAdminDragEvents(tab);
+      };
+      window._saveProjectEdit = async id => {
+        const name = document.getElementById(`edit-proj-name-${id}`).value.trim();
+        const type = document.getElementById(`edit-proj-type-${id}`).value;
+        if (!name) return;
+        const proj = S.projects.find(p => p.id === id);
+        await saveProject({ ...proj, name, type });
+        editingProjId = null;
+        setModal(renderAdmin('projects'));
+        attachAdminDragEvents('projects');
+      };
+      window._saveDeliveryEdit = async id => {
+        const full = document.getElementById(`edit-del-full-${id}`).value.trim();
+        const name = document.getElementById(`edit-del-name-${id}`).value.trim();
+        const kr   = document.getElementById(`edit-del-kr-${id}`).value;
+        if (!full || !name) return;
+        const deliv = S.deliveries.find(d => d.id === id);
+        await saveDelivery({ ...deliv, full, name, kr });
+        editingDelId = null;
+        setModal(renderAdmin('deliveries'));
+        attachAdminDragEvents('deliveries');
+      };
+      window._saveGroupEdit = async id => {
+        const name  = document.getElementById(`edit-group-name-${id}`).value.trim();
+        const color = document.getElementById(`edit-group-color-${id}`).value;
+        if (!name) return;
+        const group = S.groups.find(g => g.id === id);
+        const oldName = group.name;
+        await saveGroup({ ...group, name, color });
+        if (oldName !== name) {
+          const affected = S.deliveries.filter(d => d.kr === oldName);
+          if (affected.length) {
+            const batch = writeBatch(db);
+            affected.forEach(d => batch.set(doc(db, 'deliveries', d.id), { ...d, kr: name }));
+            await batch.commit();
+          }
+        }
+        editingGroupId = null;
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
+      };
+      window._addProject = async () => {
+        const name = document.getElementById('new-proj-name').value.trim();
+        const type = document.getElementById('new-proj-type').value;
+        if (!name) return;
+        const id = 'p' + Date.now();
+        const order = ++nextProjOrder;
+        await saveProject({ id, name, type, order });
+        setModal(renderAdmin('projects'));
+        attachAdminDragEvents('projects');
+      };
+      window._addDelivery = async () => {
+        const name = document.getElementById('new-del-name').value.trim();
+        const full = document.getElementById('new-del-full').value.trim();
+        const kr   = document.getElementById('new-del-kr').value;
+        if (!name || !full) return;
+        const id = 'd' + Date.now();
+        const order = ++nextDelOrder;
+        await saveDelivery({ id, name, full, kr, order });
+        setModal(renderAdmin('deliveries'));
+        attachAdminDragEvents('deliveries');
+      };
+      window._addGroup = async () => {
+        const name = document.getElementById('new-group-name').value.trim();
+        if (!name) return;
+        if (S.groups.some(g => g.name === name)) { alert('Já existe um grupo com esse nome.'); return; }
+        const id = 'g' + Date.now();
+        const order = ++nextGroupOrder;
+        const color = nextAutoColor();
+        await saveGroup({ id, name, color, order });
+        setModal(renderAdmin('groups'));
+        attachAdminDragEvents('groups');
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // MODAL FECHAMENTO SEMANAL
+    // ═══════════════════════════════════════════════════════
+    function showWeeklyModal() {
+      const weeksClosed = S.snapshots.filter(s => s.isWeekly).length;
+      const nextWeek = weeksClosed + 1;
+      setModal(`
+        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
+          <div class="bg-white rounded-2xl w-full max-w-sm shadow-2xl border border-slate-200 fade-in">
+            <div class="p-6">
+              <div class="flex items-center gap-3 mb-5">
+                <div class="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-xl">📅</div>
+                <div>
+                  <h3 class="text-lg font-bold text-slate-900">Fechar Semana</h3>
+                  <p class="text-xs text-slate-400">Registra o estado atual como checkpoint semanal</p>
+                </div>
+              </div>
+              <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Nome do checkpoint</label>
+              <input id="week-name" value="Semana ${nextWeek}"
+                class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500 mb-4">
+              <div class="flex gap-2">
+                <button onclick="closeModal()" class="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm text-slate-600 hover:bg-slate-50">Cancelar</button>
+                <button onclick="window._closeWeek()" class="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-semibold transition-colors">Fechar Semana</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+      window._closeWeek = async () => {
+        const name = document.getElementById('week-name').value.trim() || `Semana ${nextWeek}`;
+        await takeDailySnapshot(name, true);
+        closeModal();
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // MANUAL DO EDITOR
+    // ═══════════════════════════════════════════════════════
+    const MANUAL_TABS = ['O Painel', 'Marcando Entregas', 'Configurando Período', 'Auditoria', 'Evolução'];
+
+    function showManualModal(activeTab = 0) {
+      const contents = [
+
+        // ── Aba 0: O Painel ──────────────────────────────
+        `<div class="space-y-5">
+          <p class="text-sm text-slate-600 leading-relaxed">
+            O <strong>Farol de Entregas</strong> é o painel central de acompanhamento das entregas técnicas das obras.
+            Cada linha é uma obra, cada coluna é um tipo de entrega. A cor da célula diz o status.
+          </p>
+          <div class="space-y-2">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Cores das células</h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="w-14 h-8 rounded-md border bg-emerald-100/60 text-emerald-700 border-emerald-300 mono text-[11px] font-bold flex items-center justify-center shrink-0">OK</div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Entregue</p>
+                  <p class="text-xs text-slate-400">Marcado manualmente</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="w-14 h-8 rounded-md border bg-amber-100/70 text-amber-700 border-amber-300 mono text-[11px] font-bold flex items-center justify-center shrink-0">OK</div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Entregue (amarelo)</p>
+                  <p class="text-xs text-slate-400">2º clique na célula verde</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="w-14 h-8 rounded-md border bg-rose-100/60 text-rose-700 border-rose-300 mono text-[11px] font-bold flex items-center justify-center shrink-0">ATR.</div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Atrasado</p>
+                  <p class="text-xs text-slate-400">Prazo venceu, sem entrega</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="w-14 h-8 rounded-md border bg-slate-200/80 text-slate-500 border-slate-300 mono text-[11px] font-bold flex items-center justify-center shrink-0">--</div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Pendente</p>
+                  <p class="text-xs text-slate-400">Na meta, prazo ainda não venceu</p>
+                </div>
+              </div>
+              <div class="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                <div class="w-14 h-8 rounded-md border bg-white text-slate-200 border-slate-100 mono text-[11px] font-bold flex items-center justify-center shrink-0 opacity-40">N/A</div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Sem meta</p>
+                  <p class="text-xs text-slate-400">Esta entrega não se aplica à obra</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="bg-blue-50 border border-blue-100 rounded-xl p-4 text-sm text-blue-800">
+            💡 O rodapé de cada seção mostra <strong>Aplicável</strong> (quantas obras têm a entrega na meta) e <strong>Entregue OK</strong> com percentual.
+          </div>
+        </div>`,
+
+        // ── Aba 1: Marcando Entregas ─────────────────────
+        `<div class="space-y-5">
+          <div class="space-y-3">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Marcar uma entrega</h4>
+            ${['Recebi o email com a entrega', 'Encontro a obra (linha) e o tipo de entrega (coluna)', 'Clico na célula — ela fica <strong class="text-emerald-700">verde (OK)</strong>', 'Pronto. Salvo automaticamente para todos.'].map((s,i) => `
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-full bg-slate-900 text-white mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">${i+1}</div>
+                <p class="text-sm text-slate-700 leading-relaxed">${s}</p>
+              </div>
+            `).join('')}
+          </div>
+          <div class="border-t border-slate-100 pt-5 space-y-3">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Corrigir um erro</h4>
+            <div class="flex items-start gap-3">
+              <div class="w-6 h-6 rounded-full bg-rose-100 text-rose-600 mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">!</div>
+              <p class="text-sm text-slate-700">Cada clique avança o ciclo: <strong>--/ATR. → OK verde → OK amarelo → desmarcado</strong>. Marquei errado? Continue clicando até voltar ao estado desejado.</p>
+            </div>
+          </div>
+          <div class="bg-amber-50 border border-amber-100 rounded-xl p-4 text-sm text-amber-800">
+            ⚠️ Células <strong>vermelhas (ATR.)</strong> aparecem automaticamente quando o prazo vence. Para resolver: receba a entrega normalmente e clique na célula.
+          </div>
+        </div>`,
+
+        // ── Aba 2: Configurando Período ──────────────────
+        `<div class="space-y-5">
+          <p class="text-sm text-slate-600 leading-relaxed">Um <strong>período</strong> é o mês de acompanhamento. No início de cada mês, o gestor cria o período e configura as metas.</p>
+          <div class="space-y-3">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Criando um período</h4>
+            ${[
+              'Clique em <strong>+ Período</strong> no header',
+              'Preencha o nome (ex: Junho 2025) e as datas de início e fim',
+              'Defina o <strong>prazo de cada entrega</strong> — a data em que cada item deve ser recebido',
+              'Na grade de escopo, marque quais entregas cada obra tem como meta neste período',
+              'Clique <strong>Salvar período</strong>',
+            ].map((s,i) => `
+              <div class="flex items-start gap-3">
+                <div class="w-6 h-6 rounded-full bg-slate-900 text-white mono text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">${i+1}</div>
+                <p class="text-sm text-slate-700 leading-relaxed">${s}</p>
+              </div>
+            `).join('')}
+          </div>
+          <div class="border-t border-slate-100 pt-4">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Fechamento semanal</h4>
+            <p class="text-sm text-slate-600 leading-relaxed">No final de cada semana, clique em <strong>📅 Fechar Semana</strong>. Isso cria um checkpoint do estado atual — útil para comparar semana a semana na tela de Evolução.</p>
+          </div>
+        </div>`,
+
+        // ── Aba 3: Auditoria ─────────────────────────────
+        `<div class="space-y-5">
+          <p class="text-sm text-slate-600 leading-relaxed">
+            A aba <strong>Auditoria</strong> fica dentro do painel <strong>🕐 Histórico</strong> (botão no header). Ela registra cada alteração feita no período atual.
+          </p>
+          <div class="space-y-3">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">O que aparece</h4>
+            <div class="bg-slate-50 border border-slate-100 rounded-xl p-4 space-y-3">
+              <div class="flex items-start gap-3">
+                <div class="w-2.5 h-2.5 rounded-full bg-emerald-500 mt-1.5 shrink-0"></div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Parque dos Ingleses Liverpool</p>
+                  <p class="text-xs text-slate-500">Rep. Semanal 1 · <span class="bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded mono text-[9px] font-bold">✓ Entregue</span></p>
+                  <p class="mono text-[9px] text-slate-400 mt-0.5">05/06 às 14h32</p>
+                </div>
+              </div>
+              <div class="flex items-start gap-3">
+                <div class="w-2.5 h-2.5 rounded-full bg-slate-400 mt-1.5 shrink-0"></div>
+                <div>
+                  <p class="text-sm font-semibold text-slate-700">Maison</p>
+                  <p class="text-xs text-slate-500">Ata Semanal 2 · <span class="bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded mono text-[9px] font-bold">↩ Desmarcado</span></p>
+                  <p class="mono text-[9px] text-slate-400 mt-0.5">05/06 às 11h15</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="space-y-2">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Buscando</h4>
+            <p class="text-sm text-slate-600">Use o campo de busca para filtrar por nome da obra ou nome da entrega. Útil para verificar o histórico de uma obra específica.</p>
+          </div>
+        </div>`,
+
+        // ── Aba 4: Evolução ──────────────────────────────
+        `<div class="space-y-5">
+          <p class="text-sm text-slate-600 leading-relaxed">
+            A aba <strong>Evolução</strong> mostra o avanço do período ao longo do tempo — quantos % das entregas foram concluídas a cada dia.
+          </p>
+          <div class="space-y-3">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">O gráfico</h4>
+            <div class="bg-slate-50 border border-slate-100 rounded-xl p-4 flex items-center gap-4">
+              <div class="flex items-center gap-1.5">
+                <div class="w-3 h-3 rounded-full bg-blue-500 border-2 border-white shadow"></div>
+                <span class="text-xs text-slate-600">Registro diário</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <div class="w-4 h-4 rounded-full bg-indigo-500 border-2 border-white shadow"></div>
+                <span class="text-xs text-slate-600">Checkpoint semanal</span>
+              </div>
+            </div>
+            <p class="text-sm text-slate-600">Pontos <strong class="text-indigo-600">roxos maiores</strong> são os fechamentos de semana. Cada um mostra o ganho em <strong>pp</strong> (pontos percentuais) em relação à semana anterior.</p>
+          </div>
+          <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-4 space-y-1.5">
+            <p class="text-xs font-semibold text-indigo-800">Exemplo de leitura:</p>
+            <p class="text-xs text-indigo-700">Semana 1: 20% → Semana 2: 45% → <strong>+25pp</strong> de avanço na semana.</p>
+            <p class="text-xs text-indigo-700">Quanto maior o salto, mais entregas foram recebidas naquela semana.</p>
+          </div>
+          <div class="space-y-2">
+            <h4 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">Aba Obras</h4>
+            <p class="text-sm text-slate-600">Mostra o progresso individual de cada obra — quais estão mais adiantadas e quais ainda têm entregas pendentes.</p>
+          </div>
+        </div>`,
+      ];
+
+      const render = (tab) => `
+        <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
+          <div class="bg-white rounded-2xl w-full max-w-xl shadow-2xl border border-slate-200 fade-in flex flex-col" style="max-height:88vh">
+
+            <div class="flex items-center justify-between px-6 pt-5 pb-4 border-b border-slate-100 shrink-0">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-center text-lg">📖</div>
+                <div>
+                  <h2 class="text-base font-bold text-slate-900">Manual do Editor</h2>
+                  <p class="text-xs text-slate-400">Guia prático de uso do Farol</p>
+                </div>
+              </div>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none p-1">✕</button>
+            </div>
+
+            <!-- Tabs -->
+            <div class="px-4 pt-3 shrink-0 overflow-x-auto">
+              <div class="flex gap-1 border-b border-slate-100 pb-0 min-w-max">
+                ${MANUAL_TABS.map((t,i) => `
+                  <button onclick="window._manualTab(${i})"
+                    class="px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors border-b-2 -mb-px ${tab===i ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-400 hover:text-slate-700'}">
+                    ${t}
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+
+            <!-- Content -->
+            <div class="flex-1 overflow-y-auto px-6 py-5">
+              ${contents[tab]}
+            </div>
+
+            <div class="px-6 py-4 border-t border-slate-100 flex items-center justify-between shrink-0">
+              <button onclick="window._manualTab(${Math.max(0, tab-1)})" class="text-xs text-slate-400 hover:text-slate-600 ${tab===0?'invisible':''}">← Anterior</button>
+              <div class="flex gap-1.5">
+                ${MANUAL_TABS.map((_,i) => `<div class="w-1.5 h-1.5 rounded-full ${i===tab?'bg-blue-600':'bg-slate-200'}"></div>`).join('')}
+              </div>
+              ${tab < MANUAL_TABS.length-1
+                ? `<button onclick="window._manualTab(${tab+1})" class="text-xs font-semibold text-blue-600 hover:text-blue-700">Próximo →</button>`
+                : `<button onclick="closeModal()" class="text-xs font-semibold text-emerald-600 hover:text-emerald-700">✓ Entendido</button>`
+              }
+            </div>
+          </div>
+        </div>
+      `;
+
+      setModal(render(activeTab));
+      window._manualTab = (i) => { setModal(render(i)); };
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // RENDER — MAIN
+    // ═══════════════════════════════════════════════════════
+    function render() {
+      if (!S.loaded.projects || !S.loaded.deliveries || !S.loaded.groups) return;
+      document.getElementById('app').innerHTML = renderHeader() + renderBody();
+      attachEvents();
+    }
+
+    function renderHeader() {
+      const { meta, delivered, pct } = calcTotals();
+      return `
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pt-8">
+          <header class="mb-6 flex flex-col md:flex-row md:items-end justify-between gap-6 px-2">
+            <div>
+              <div class="flex items-center gap-4 mb-2">
+                <svg width="100" height="36" viewBox="0 0 100 36" fill="none">
+                  <text x="0" y="27" fill="#113695" style="font:bold 26px sans-serif">Trinus</text>
+                  <text x="73" y="15" fill="#113695" style="font:bold 11px sans-serif">.co</text>
+                </svg>
+                <div class="h-7 w-px bg-slate-200"></div>
+                <div>
+                  <div class="mono text-[10px] font-bold uppercase tracking-[0.2em] text-accent">FAROL DE ENTREGAS</div>
+                  <div class="mono text-[9px] text-slate-400 uppercase tracking-widest">Dashboard de Entregas</div>
+                </div>
+              </div>
+              <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-900 mb-1">PAINEL DE MONITORAMENTO</h1>
+              <p class="text-slate-500 text-sm">
+                Acompanhamento em tempo real das entregas técnicas para ${S.projects.length} obras ativas.
+              </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <a href="index.html" class="px-3 py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 shadow-sm">⌂ Início</a>
+              ${S.isEditor && S.periods.length > 0 ? `
+                <select id="period-sel" class="bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 shadow-sm outline-none focus:border-blue-500 cursor-pointer">
+                  ${S.periods.map(p=>`<option value="${p.id}" ${p.id===S.currentPeriodId?'selected':''}>${p.isPrimary?'⭐ ':''}${p.name}</option>`).join('')}
+                </select>
+              ` : S.period ? `
+                <span class="bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs font-medium text-slate-700 shadow-sm">${S.period.name}</span>
+              ` : ''}
+
+              ${S.isEditor ? `
+                <button id="btn-new-period" class="px-3 py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 shadow-sm">+ Período</button>
+                ${S.period ? `<button id="btn-edit-period" class="px-3 py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 shadow-sm">Editar</button>` : ''}
+                ${S.period ? `<button id="btn-weekly" class="px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-indigo-600 hover:bg-indigo-100 shadow-sm">📅 Fechar Semana</button>` : ''}
+                <button id="btn-admin" class="px-3 py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-slate-600 hover:bg-slate-50 shadow-sm">⚙️ Admin</button>
+                <button id="btn-manual" class="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-[10px] font-bold uppercase tracking-wider text-amber-700 hover:bg-amber-100 shadow-sm">📖 Manual</button>
+              ` : ''}
+
+              <button id="btn-late" class="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm transition-all ${S.showLateOnly?'bg-rose-600 text-white':'bg-white text-slate-500 border border-slate-200 hover:bg-slate-50'}">
+                🔍 ${S.showLateOnly ? 'Atrasados' : 'Exibir Atrasos'}
+              </button>
+
+              <button id="btn-export" class="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm transition-all" title="Baixar a matriz em imagem PNG">
+                🖼️ Exportar
+              </button>
+
+              <button id="btn-sidebar" class="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-600 border border-slate-200 hover:bg-slate-50 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                🕐 Histórico
+              </button>
+
+              ${S.isEditor
+                ? `<button id="btn-logout" class="flex items-center gap-1.5 px-3 py-2 bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-100 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                    <div class="w-2 h-2 rounded-full bg-rose-500 pulse-dot"></div>Sair do Editor
+                  </button>`
+                : `<button id="btn-login" class="flex items-center gap-1.5 px-3 py-2 bg-white text-slate-400 border border-slate-200 hover:bg-slate-50 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                    🔒 Entrar
+                  </button>`
+              }
+
+              <div class="flex bg-white rounded-lg border border-slate-200 p-1 shadow-sm gap-1">
+                <button id="btn-view-matrix" class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.view==='matrix'?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
+                  📋 Matriz
+                </button>
+                <button id="btn-view-dashboard" class="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.view==='dashboard'?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
+                  📊 Dashboard
+                </button>
+              </div>
+
+              <div class="flex bg-white rounded-lg border border-slate-200 p-1 shadow-sm">
+                ${['All','Gerenciamento','Construção'].map(s=>`
+                  <button data-sector="${s}" class="sector-btn px-3 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all ${S.sectorFilter===s?'bg-slate-900 text-white shadow-sm':'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}">
+                    ${s==='All'?'Todas':s}
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+          </header>
+
+          <!-- Stats + legend -->
+          <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 px-2">
+            <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-center gap-4">
+              <div class="w-10 h-10 bg-emerald-50 rounded-lg flex items-center justify-center shrink-0 text-xl">✅</div>
+              <div>
+                <div id="stats-kpi" class="text-lg font-bold text-slate-900 leading-tight">
+                  <span class="text-slate-400 font-medium">${meta}</span> / <span class="text-emerald-600">${delivered}</span>
+                </div>
+                <div id="stats-pct" class="mono text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-0.5">Status: ${pct}% Concluído</div>
+              </div>
+            </div>
+            <div class="md:col-span-3 bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center gap-5 mono text-[10px] font-bold uppercase tracking-wider">
+              <div class="flex items-center gap-2"><div class="w-4 h-4 rounded bg-slate-200 border border-slate-300"></div><span class="text-slate-500">Meta Projetada</span></div>
+              <div class="flex items-center gap-2"><div class="w-1 h-3 rounded bg-emerald-500"></div><span class="text-emerald-700">OK (Entregue)</span></div>
+              <div class="flex items-center gap-2"><div class="w-1 h-3 rounded bg-amber-500"></div><span class="text-amber-700">OK (Amarelo)</span></div>
+              <div class="flex items-center gap-2"><div class="w-1 h-3 rounded bg-rose-500"></div><span class="text-rose-700">Atrasado</span></div>
+              <div class="flex items-center gap-2 opacity-40"><div class="w-4 h-4 rounded bg-white border border-slate-100"></div><span class="text-slate-300">Sem Meta</span></div>
+              ${S.isEditor?`<div class="ml-auto flex items-center gap-2 text-accent bg-blue-50 px-3 py-1 rounded-full">✏️ Clique na célula para alterar</div>`:''}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBody() {
+      if (!S.period) return `
+        <div class="max-w-[1920px] mx-auto px-8 pb-16 fade-in">
+          <div class="flex flex-col items-center justify-center py-32 text-slate-400">
+            <div class="text-6xl mb-4">🏗️</div>
+            <p class="text-lg font-bold text-slate-700 mb-1">Nenhum período configurado</p>
+            <p class="text-sm text-slate-400 mb-6">Crie um período para começar</p>
+            ${S.isEditor?`<button id="btn-new-period-empty" class="text-sm bg-slate-900 hover:bg-blue-600 text-white px-5 py-2.5 rounded-xl font-semibold transition-colors shadow-lg">Criar primeiro período</button>`:`<p class="text-xs text-slate-400">Aguardando o editor configurar</p>`}
+          </div>
+        </div>
+      `;
+
+      if (S.view === 'dashboard') return renderDashboardBody();
+
+      const types = S.sectorFilter === 'All' ? ['Gerenciamento','Construção'] : [S.sectorFilter];
+      return `
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pb-16 space-y-12 fade-in">
+          ${types.map(t => renderSection(t)).join('')}
+          <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
+            <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
+            <span>Farol de Entregas · Trinus .co · v3</span>
+          </footer>
+        </div>
+      `;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // DASHBOARD DE DESTAQUES
+    // ═══════════════════════════════════════════════════════
+    function pctColor(pct) {
+      if (pct >= 80) return { bar: 'bg-emerald-500', text: 'text-emerald-700' };
+      if (pct >= 50) return { bar: 'bg-amber-500',   text: 'text-amber-700'   };
+      return           { bar: 'bg-rose-500',    text: 'text-rose-700'    };
+    }
+
+    function dashboardProjects() {
+      return S.projects
+        .filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter)
+        .map(p => {
+          let meta = 0, delivered = 0;
+          S.deliveries.forEach(d => {
+            const s = getStatus(p.id, d.id);
+            if (s !== 'na') meta++;
+            if (isDone(s)) delivered++;
+          });
+          return { name: p.name, meta, delivered, pct: meta > 0 ? Math.round(delivered / meta * 100) : 0 };
+        })
+        .filter(p => p.meta > 0)
+        .sort((a, b) => b.pct - a.pct);
+    }
+
+    function dashboardDeliveryTypes() {
+      const projects = S.projects.filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter);
+      return S.deliveries
+        .map(d => {
+          const { meta, delivered, pct } = colSummary(d.id, projects);
+          return { name: d.name, full: d.full, kr: d.kr, color: groupColor(d.kr), meta, delivered, pct };
+        })
+        .filter(d => d.meta > 0)
+        .sort((a, b) => b.pct - a.pct);
+    }
+
+    function dashboardCriticalItems(limit = 12) {
+      const projects = S.projects.filter(p => S.sectorFilter === 'All' || p.type === S.sectorFilter);
+      const now = new Date();
+      const items = [];
+      projects.forEach(p => {
+        S.deliveries.forEach(d => {
+          if (getStatus(p.id, d.id) !== 'late') return;
+          const dl = S.period.deliveries?.[d.id];
+          const daysLate = dl ? Math.floor((now - new Date(dl + 'T23:59:59')) / 86400000) : 0;
+          items.push({ project: p.name, delivery: d, daysLate });
+        });
+      });
+      return items.sort((a, b) => b.daysLate - a.daysLate).slice(0, limit);
+    }
+
+    function renderDashBarRow(rank, label, pct, sub, color, zone) {
+      const c = pctColor(pct);
+      const zoneCls = zone === 'top' ? 'bg-emerald-50/70 border-emerald-200' : zone === 'bottom' ? 'bg-rose-50/70 border-rose-200' : 'bg-white border-slate-100';
+      const rankCls = zone === 'top' ? 'text-emerald-600' : zone === 'bottom' ? 'text-rose-600' : 'text-slate-300';
+      return `
+        <div class="flex items-center gap-3 px-2.5 py-1.5 rounded-lg border ${zoneCls}">
+          <span class="mono text-[10px] font-extrabold ${rankCls} w-6 text-right shrink-0">#${rank}</span>
+          <span class="text-xs font-medium text-slate-700 w-40 truncate shrink-0" title="${label}">${label}</span>
+          <div class="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden">
+            <div class="h-full rounded-full ${color ? `bg-${color}-500` : c.bar}" style="width:${pct}%"></div>
+          </div>
+          <span class="mono text-[11px] font-extrabold ${c.text} w-10 text-right shrink-0">${pct}%</span>
+          <span class="mono text-[9px] text-slate-400 w-12 text-right shrink-0">${sub}</span>
+        </div>
+      `;
+    }
+
+    // Lista completa ordenada por %, com destaque visual para o top 4 e os 4 últimos colocados.
+    // `key` identifica o card (S.dashExpanded[key]) para lembrar se foi expandido, entre renders.
+    function renderDashRankingCard(key, title, subtitle, list, getLabel, getPct, getSub, getColor) {
+      if (list.length === 0) return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <h3 class="text-sm font-bold text-slate-900">${title}</h3>
+          <p class="text-[11px] text-slate-400 mt-0.5 mb-4">${subtitle}</p>
+          <p class="text-xs text-slate-400 text-center py-8">Sem dados no escopo do período atual.</p>
+        </div>
+      `;
+      const n = list.length;
+      const topN = Math.min(4, Math.ceil(n / 2));
+      const bottomN = Math.min(4, n - topN);
+      const expanded = !!S.dashExpanded[key];
+      return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <div class="flex items-start justify-between gap-3 mb-3">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900">${title}</h3>
+              <p class="text-[11px] text-slate-400 mt-0.5">${subtitle}</p>
+            </div>
+            ${n > 8 ? `
+              <button data-dash-expand="${key}" class="shrink-0 px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg mono text-[9px] font-bold uppercase tracking-wider text-slate-500 whitespace-nowrap">
+                ${expanded ? '⤡ Recolher' : '⤢ Expandir tudo'}
+              </button>
+            ` : ''}
+          </div>
+          <div class="space-y-1.5 pr-1 ${expanded ? '' : 'max-h-[460px] overflow-y-auto'}">
+            ${list.map((item, i) => {
+              const zone = i < topN ? 'top' : i >= n - bottomN ? 'bottom' : null;
+              return renderDashBarRow(i + 1, getLabel(item), getPct(item), getSub(item), getColor ? getColor(item) : null, zone);
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDashCriticalItems(items) {
+      return `
+        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <div class="flex items-center justify-between mb-1">
+            <h3 class="text-sm font-bold text-slate-900">🔥 Itens Críticos</h3>
+            <span class="mono text-[10px] text-slate-400">${items.length} pares obra + entrega mais atrasados agora</span>
+          </div>
+          <p class="text-[11px] text-slate-400 mb-4">Combinações específicas de obra e entrega com maior atraso em relação ao prazo</p>
+          ${items.length === 0 ? `<p class="text-xs text-slate-400 text-center py-8">Nenhum atraso no momento. 🎉</p>` : `
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+              ${items.map(it => `
+                <div class="flex items-center gap-3 p-3 bg-rose-50/50 border border-rose-100 rounded-xl">
+                  <div class="w-9 h-9 rounded-lg bg-rose-100 text-rose-700 flex items-center justify-center mono text-[11px] font-extrabold shrink-0">${it.daysLate}d</div>
+                  <div class="min-w-0">
+                    <div class="text-sm font-bold text-slate-800 truncate">${it.project}</div>
+                    <div class="flex items-center gap-1.5 mt-0.5">
+                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(it.delivery.kr)}-100 text-${groupColor(it.delivery.kr)}-700">${it.delivery.kr}</span>
+                      <span class="text-xs text-slate-500 truncate">${it.delivery.full}</span>
+                    </div>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    function renderDashboardBody() {
+      const projects = dashboardProjects();
+      const deliveryTypes = dashboardDeliveryTypes();
+      const critical = dashboardCriticalItems();
+      return `
+        <div class="max-w-[1920px] mx-auto px-4 md:px-8 pb-16 space-y-6 fade-in">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            ${renderDashRankingCard('projects', '🏗️ Ranking de Obras', 'Todas as obras por % de entregas concluídas — destaque para o top 4 e os 4 últimos colocados', projects, p => p.name, p => p.pct, p => `${p.delivered}/${p.meta}`)}
+            ${renderDashRankingCard('deliveries', '📋 Ranking de Tipos de Entrega', 'Todos os tipos de entrega por % de cumprimento entre as obras — destaque para o top 4 e os 4 últimos colocados', deliveryTypes, d => d.name, d => d.pct, d => `${d.delivered}/${d.meta}`, d => d.color)}
+          </div>
+          ${renderDashCriticalItems(critical)}
+          <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
+            <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
+            <span>Farol de Entregas · Trinus .co · v3</span>
+          </footer>
+        </div>
+      `;
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // EXPORTAR A MATRIZ EM PNG (desenhada em canvas, com o título)
+    // ═══════════════════════════════════════════════════════
+    const FAROL_TITULO = 'Farol de Entregas';
+    const COR_GRUPO = {
+      blue: ['#1d4ed8', '#dbeafe'], indigo: ['#4338ca', '#e0e7ff'], emerald: ['#047857', '#d1fae5'], amber: ['#b45309', '#fef3c7'],
+      rose: ['#be123c', '#ffe4e6'], violet: ['#6d28d9', '#ede9fe'], cyan: ['#0e7490', '#cffafe'], pink: ['#be185d', '#fce7f3'],
+      teal: ['#0f766e', '#ccfbf1'], orange: ['#c2410c', '#ffedd5'], fuchsia: ['#a21caf', '#fae8ff'], lime: ['#4d7c0f', '#ecfccb'],
+      slate: ['#475569', '#e2e8f0'],
+    };
+    // [fundo, borda, texto, rótulo]
+    const COR_CEL = {
+      delivered: ['#d1fae5', '#6ee7b7', '#047857', 'OK'], delivered_warn: ['#fef3c7', '#fcd34d', '#b45309', 'OK'],
+      late: ['#ffe4e6', '#fda4af', '#be123c', 'ATR.'], pending: ['#e2e8f0', '#cbd5e1', '#64748b', '--'],
+      na: ['#ffffff', '#f1f5f9', '#cbd5e1', 'N/A'],
+    };
+
+    async function gerarFarolCanvas() {
+      if (!S.period) throw new Error('Nenhum período selecionado');
+      try { await Promise.all([document.fonts.load('800 28px Inter'), document.fonts.load('700 13px Inter'), document.fonts.load('600 11px "JetBrains Mono"')]); } catch {}
+      const F = (peso, px, mono) => `${peso} ${px}px ${mono ? '"JetBrains Mono", monospace' : 'Inter, system-ui, sans-serif'}`;
+
+      const tipos = S.sectorFilter === 'All' ? ['Gerenciamento', 'Construção'] : [S.sectorFilter];
+      const secoes = tipos.map(t => {
+        let ps = S.projects.filter(p => p.type === t);
+        if (S.showLateOnly) ps = ps.filter(p => S.deliveries.some(d => getStatus(p.id, d.id) === 'late'));
+        return { tipo: t, ps };
+      }).filter(s => s.ps.length);
+      if (!secoes.length) throw new Error('Nenhuma obra para exportar');
+      const cols = groupedDeliveries().flatMap(({ group, items }) => items.map(d => ({ d, group })));
+
+      const medidor = document.createElement('canvas').getContext('2d');
+      medidor.font = F(700, 13);
+      const larguraObra = Math.max(220, Math.ceil(Math.max(...secoes.flatMap(s => s.ps.map(p => medidor.measureText(p.name).width)))) + 32);
+      medidor.font = F(700, 11);
+      const cellW = Math.max(96, Math.ceil(Math.max(...cols.map(({ d }) => medidor.measureText(d.name).width))) + 24), rowH = 36, pad = 32, titleH = 108, secTitleH = 40, headH = 66, footH = 30, gap = 28, legendH = 64;
+      const W = pad * 2 + larguraObra + cols.length * cellW;
+      const H = titleH + secoes.reduce((s, x) => s + secTitleH + headH + x.ps.length * rowH + footH * 2 + gap, 0) + legendH + 20;
+      const R = 2;
+      const cv = document.createElement('canvas');
+      cv.width = W * R; cv.height = H * R;
+      const c = cv.getContext('2d');
+      c.scale(R, R);
+
+      const caixa = (x, y, w, h, r, fill, stroke) => {
+        c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+        c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+        if (fill) { c.fillStyle = fill; c.fill(); }
+        if (stroke) { c.strokeStyle = stroke; c.lineWidth = 1; c.stroke(); }
+      };
+      const texto = (t, x, y, fonte, cor, alinhar = 'left') => { c.font = fonte; c.fillStyle = cor; c.textAlign = alinhar; c.textBaseline = 'middle'; c.fillText(t, x, y); };
+
+      c.fillStyle = '#f8fafc'; c.fillRect(0, 0, W, H);
+
+      // Cabeçalho com marca e título
+      const todas = secoes.flatMap(s => s.ps);
+      const tot = calcTotals(todas);
+      texto('Trinus', pad, 40, 'bold 26px sans-serif', '#113695');
+      texto('.co', pad + 73, 29, 'bold 11px sans-serif', '#113695');
+      c.fillStyle = '#e2e8f0'; c.fillRect(pad + 108, 24, 1, 28);
+      texto(FAROL_TITULO.toUpperCase(), pad + 122, 32, F(700, 10, true), '#113695');
+      texto('Matriz de acompanhamento', pad + 122, 47, F(400, 9, true), '#94a3b8');
+      texto(`${FAROL_TITULO} · ${S.period.name}`, pad, 78, F(800, 26), '#0f172a');
+      const agora = new Date();
+      texto(`Gerado em ${agora.toLocaleDateString('pt-BR')} às ${agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · ${tot.pct}% concluído (${tot.delivered} de ${tot.meta} entregas)`, pad, 98, F(400, 11, true), '#64748b');
+
+      let y = titleH;
+      const xCel = i => pad + larguraObra + i * cellW;
+      secoes.forEach(sec => {
+        texto(`OBRAS DE ${sec.tipo.toUpperCase()}`, pad, y + 14, F(700, 12, true), '#334155');
+        texto(`${sec.ps.length} obras`, W - pad, y + 14, F(400, 10, true), '#94a3b8', 'right');
+        y += secTitleH;
+        const alturaTab = headH + sec.ps.length * rowH + footH * 2;
+        caixa(pad, y, W - pad * 2, alturaTab, 14, '#ffffff', '#dbeafe');
+        c.save(); c.beginPath(); c.rect(pad, y, W - pad * 2, alturaTab); c.clip();
+
+        // Cabeçalho da tabela
+        c.fillStyle = '#f1f5f9'; c.fillRect(pad, y, W - pad * 2, headH);
+        texto('EMPREENDIMENTO', pad + 16, y + headH / 2, F(700, 10, true), '#64748b');
+        let i = 0;
+        groupedDeliveries().forEach(({ group, items }) => {
+          const [fort, claro] = COR_GRUPO[group.color] || COR_GRUPO.slate;
+          c.fillStyle = claro; c.fillRect(xCel(i), y, items.length * cellW, 22);
+          texto(group.name, xCel(i) + (items.length * cellW) / 2, y + 11, F(700, 10, true), fort, 'center');
+          c.fillStyle = '#cbd5e1'; c.fillRect(xCel(i), y, 1, headH);
+          items.forEach((d, k) => {
+            const dl = S.period.deliveries?.[d.id];
+            const vencido = dl && new Date(dl + 'T23:59:59') < agora;
+            texto(d.name, xCel(i + k) + cellW / 2, y + 36, F(700, 11), '#1e293b', 'center');
+            if (dl) texto(fmtDate(dl), xCel(i + k) + cellW / 2, y + 53, F(vencido ? 700 : 400, 9, true), vencido ? '#e11d48' : fort, 'center');
+          });
+          i += items.length;
+        });
+
+        // Linhas
+        sec.ps.forEach((p, r) => {
+          const ry = y + headH + r * rowH;
+          c.fillStyle = r % 2 ? '#f8fafc' : '#ffffff'; c.fillRect(pad, ry, W - pad * 2, rowH);
+          c.fillStyle = '#f1f5f9'; c.fillRect(pad, ry + rowH - 1, W - pad * 2, 1);
+          texto(p.name, pad + 16, ry + rowH / 2, F(700, 13), '#1e293b');
+          cols.forEach(({ d }, k) => {
+            const [fundo, borda, cor, rot] = COR_CEL[getStatus(p.id, d.id)];
+            caixa(xCel(k) + 6, ry + 6, cellW - 12, rowH - 12, 6, fundo, borda);
+            texto(rot, xCel(k) + cellW / 2, ry + rowH / 2 + 0.5, F(700, 11, true), cor, 'center');
+          });
+        });
+
+        // Rodapés: aplicável e entregue
+        const fy = y + headH + sec.ps.length * rowH;
+        c.fillStyle = '#e2e8f0'; c.fillRect(pad, fy, W - pad * 2, footH);
+        c.fillStyle = '#ecfdf5'; c.fillRect(pad, fy + footH, W - pad * 2, footH);
+        texto('APLICÁVEL', pad + larguraObra - 14, fy + footH / 2, F(700, 10, true), '#475569', 'right');
+        texto('ENTREGUE OK', pad + larguraObra - 14, fy + footH * 1.5, F(700, 10, true), '#065f46', 'right');
+        cols.forEach(({ d }, k) => {
+          const { meta, delivered, pct } = colSummary(d.id, sec.ps);
+          texto(String(meta), xCel(k) + cellW / 2, fy + footH / 2, F(700, 12, true), '#0f172a', 'center');
+          texto(`${delivered}  ${meta ? pct + '%' : '--'}`, xCel(k) + cellW / 2, fy + footH * 1.5, F(700, 11, true), '#047857', 'center');
+        });
+        c.restore();
+        y += alturaTab + gap;
+      });
+
+      // Legenda
+      let lx = pad;
+      [['delivered', 'OK (entregue)'], ['delivered_warn', 'OK (amarelo)'], ['late', 'Atrasado'], ['pending', 'Meta projetada (--)'], ['na', 'Sem meta (N/A)']].forEach(([k, rot]) => {
+        const [fundo, borda] = COR_CEL[k];
+        caixa(lx, y + 4, 22, 14, 4, fundo, borda);
+        texto(rot, lx + 30, y + 11.5, F(700, 10, true), '#475569');
+        c.font = F(700, 10, true); lx += 30 + c.measureText(rot).width + 26;
+      });
+      texto(`${FAROL_TITULO} · Trinus .co`, W - pad, y + 11.5, F(400, 10, true), '#94a3b8', 'right');
+      return cv;
+    }
+    window._farolCanvas = gerarFarolCanvas;
+    window._exportarPng = async () => {
+      try {
+        const cv = await gerarFarolCanvas();
+        const nome = `${FAROL_TITULO} ${S.period.name}`.replace(/[^\p{L}\p{N}]+/gu, '_') + '.png';
+        cv.toBlob(b => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(b); a.download = nome;
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        }, 'image/png');
+      } catch (e) { alert('Não foi possível exportar: ' + e.message); }
+    };
+
+    function renderSection(type) {
+      let projects = S.projects.filter(p => p.type === type);
+      if (S.showLateOnly) projects = projects.filter(p => S.deliveries.some(d => getStatus(p.id,d.id) === 'late'));
+      if (projects.length === 0) return '';
+      const groups = groupedDeliveries();
+      const flatDeliveries = groups.flatMap(({group, items}) => items.map(d => ({ d, color: group.color })));
+
+      return `
+        <div class="space-y-4">
+          <div class="flex items-center gap-3 px-2">
+            <h2 class="mono text-xs font-bold uppercase tracking-[0.2em] text-slate-700">Obras de ${type}</h2>
+            <div class="h-px flex-1 bg-slate-200"></div>
+            <span class="mono text-[10px] text-slate-400">${projects.length} obras</span>
+          </div>
+          <div class="bg-white rounded-2xl border border-blue-100 shadow-2xl overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full border-collapse">
+                <thead>
+                  <tr class="bg-slate-100">
+                    <th class="sticky-col bg-slate-100 p-3 text-left border-b border-r border-slate-200 min-w-[240px]">
+                      <div class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest">📄 Empreendimento</div>
+                    </th>
+                    ${flatDeliveries.map(({d, color}, di) => {
+                      const dl = S.period?.deliveries?.[d.id];
+                      const past = dl && new Date(dl+'T23:59:59') < new Date();
+                      const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
+                      return `<th class="p-1.5 border-b border-r border-${color}-200 min-w-[65px] text-center bg-${color}-100/40 ${boundary?'border-l-2 border-l-slate-300':''}" title="${d.full}">
+                        <div class="mono text-[9px] font-bold text-${color}-700 mb-0.5">${d.kr}</div>
+                        <div class="text-[11px] font-bold text-${color}-950 leading-tight">${d.name}</div>
+                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':`text-${color}-400`}">${fmtDate(dl)}</div>`:''}
+                      </th>`;
+                    }).join('')}
+                  </tr>
+                </thead>
+                <tbody>
+                  ${projects.map((proj,idx) => `
+                    <tr class="hover:bg-slate-50 group transition-colors ${idx%2===0?'bg-white':'bg-slate-50/30'}">
+                      <td class="sticky-col bg-inherit p-3 border-b border-r border-slate-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.04)]">
+                        <span class="text-[13px] font-bold text-slate-800 group-hover:text-blue-600 transition-colors">${proj.name}</span>
+                      </td>
+                      ${flatDeliveries.map(({d, color}, di) => {
+                        const s = getStatus(proj.id,d.id);
+                        const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
+                        return `<td class="p-1 border-b border-r border-slate-100 text-center ${boundary?'border-l-2 border-l-slate-200':''} bg-${color}-50/5">
+                          <div class="cell ${s==='na'?'cell-na':''} w-full py-1.5 rounded-md border mono text-[11px] font-bold shadow-sm transition-colors duration-150 ${S.isEditor&&s!=='na'?'hover:scale-105 active:scale-95':''} ${cellStyle(s)}"
+                            data-pid="${proj.id}" data-did="${d.id}">
+                            ${cellText(s)}
+                          </div>
+                        </td>`;
+                      }).join('')}
+                    </tr>
+                  `).join('')}
+                </tbody>
+                <tfoot id="tfoot-${type}" class="border-t-2 border-slate-200">
+                  ${renderTfootRows(projects)}
+                </tfoot>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderTfootRows(projects) {
+      const flatDeliveries = groupedDeliveries().flatMap(({items}) => items);
+      return `
+        <tr class="bg-slate-50/80 border-b border-slate-200">
+          <td class="sticky-col bg-slate-200 p-3 border-r border-slate-300 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.05)]">
+            <div class="mono text-[11px] font-bold text-slate-600 uppercase tracking-widest text-right pr-2">Aplicável</div>
+          </td>
+          ${flatDeliveries.map(d => {
+            const { meta } = colSummary(d.id, projects);
+            return `<td class="p-1.5 text-center border-r border-slate-200">
+              <div class="mono text-[13px] font-bold text-slate-900 bg-white/60 rounded py-0.5">${meta}</div>
+            </td>`;
+          }).join('')}
+        </tr>
+        <tr class="bg-emerald-50/60">
+          <td class="sticky-col bg-emerald-100 p-3 border-r border-emerald-200 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.06)]">
+            <div class="mono text-[11px] font-bold text-emerald-800 uppercase tracking-widest text-right pr-2">Entregue OK</div>
+          </td>
+          ${flatDeliveries.map(d => {
+            const { meta, delivered, pct } = colSummary(d.id, projects);
+            return `<td class="p-1.5 text-center border-r border-emerald-100">
+              <div class="flex items-center justify-center gap-1">
+                <span class="mono text-[13px] font-bold text-emerald-900">${delivered}</span>
+                <span class="mono text-[10px] font-extrabold text-emerald-600 bg-white/50 px-1 rounded">${meta>0?pct+'%':'—'}</span>
+              </div>
+            </td>`;
+          }).join('')}
+        </tr>
+      `;
+    }
+
+    function cellStyle(s) {
+      switch(s) {
+        case 'delivered': return 'bg-emerald-100/60 text-emerald-700 border-emerald-300';
+        case 'delivered_warn': return 'bg-amber-100/70 text-amber-700 border-amber-300';
+        case 'late':      return 'bg-rose-100/60 text-rose-700 border-rose-300';
+        case 'pending':   return 'bg-slate-200/80 text-slate-500 border-slate-300';
+        case 'na':        return 'bg-white text-slate-200 border-slate-100 opacity-40';
+      }
+    }
+    function cellText(s) {
+      switch(s) {
+        case 'delivered': return 'OK';
+        case 'delivered_warn': return 'OK';
+        case 'late':      return 'ATR.';
+        case 'pending':   return '--';
+        case 'na':        return 'N/A';
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // PATCH PARCIAL (sem re-render da página)
+    // ═══════════════════════════════════════════════════════
+    function patchCells() {
+      if (!S.period || !document.querySelector('[data-pid]')) { render(); return; }
+
+      document.querySelectorAll('.cell[data-pid]').forEach(cell => {
+        const s = getStatus(cell.dataset.pid, cell.dataset.did);
+        const edCls = S.isEditor && s !== 'na' ? 'hover:scale-105 active:scale-95 cursor-pointer' : '';
+        cell.className = `cell ${s==='na'?'cell-na':''} w-full py-1.5 rounded-md border mono text-[11px] font-bold shadow-sm transition-colors duration-150 ${edCls} ${cellStyle(s)}`.trim();
+        cell.textContent = cellText(s);
+      });
+
+      const { meta, delivered, pct } = calcTotals();
+      const kpi = document.getElementById('stats-kpi');
+      if (kpi) kpi.innerHTML = `<span class="text-slate-400 font-medium">${meta}</span> / <span class="text-emerald-600">${delivered}</span>`;
+      const pctEl = document.getElementById('stats-pct');
+      if (pctEl) pctEl.textContent = `Status: ${pct}% Concluído`;
+
+      ['Gerenciamento','Construção'].forEach(type => {
+        const tfoot = document.getElementById(`tfoot-${type}`);
+        if (tfoot) tfoot.innerHTML = renderTfootRows(S.projects.filter(p=>p.type===type));
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // SIDEBAR
+    // ═══════════════════════════════════════════════════════
+    function openSidebar() {
+      S.sidebarOpen = true;
+      document.getElementById('sidebar').classList.add('open');
+      document.getElementById('sidebar-overlay').classList.add('open');
+      renderSidebar();
+    }
+    window.closeSidebar = () => {
+      S.sidebarOpen = false;
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebar-overlay').classList.remove('open');
+    };
+
+    function renderSidebar() {
+      const tabs = [
+        { key:'timeline', label:'Auditoria',   icon:'🕐' },
+        { key:'charts',   label:'Evolução',    icon:'📈' },
+        { key:'projects', label:`Obras`,       icon:'🏗️' },
+      ];
+      document.getElementById('sidebar-inner').innerHTML = `
+        <div class="p-6 border-b border-slate-100 space-y-4 shrink-0">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-lg font-bold text-slate-900">Painel de Evolução</h3>
+              <p class="text-xs text-slate-400 mt-0.5">Auditoria, histórico e progresso por obra</p>
+            </div>
+            <button onclick="closeSidebar()" class="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg">✕</button>
+          </div>
+          <div class="flex bg-slate-100 p-1 rounded-xl gap-1">
+            ${tabs.map(t=>`
+              <button onclick="window._sidebarTab('${t.key}')"
+                class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1 ${S.sidebarTab===t.key?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">
+                ${t.icon} ${t.label}
+              </button>
+            `).join('')}
+          </div>
+          ${S.sidebarTab !== 'charts' ? `
+            <div class="relative">
+              <input id="sidebar-search" type="text" value="${S.sidebarSearch}"
+                placeholder="${S.sidebarTab==='projects'?'Filtrar obra...':'Filtrar...'}"
+                class="w-full text-xs pl-9 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:bg-white focus:border-blue-500 font-medium"
+                oninput="window._sidebarSearch(this.value)">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+              ${S.sidebarSearch?`<button onclick="window._sidebarSearch('')" class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1">✕</button>`:''}
+            </div>
+          ` : ''}
+        </div>
+        <div class="flex-1 overflow-y-auto p-6">
+          ${S.sidebarTab==='timeline' ? renderSidebarTimeline() : ''}
+          ${S.sidebarTab==='charts'   ? renderSidebarCharts()   : ''}
+          ${S.sidebarTab==='projects' ? renderSidebarProjects()  : ''}
+        </div>
+        <div class="p-4 border-t border-slate-100 text-center mono text-[10px] text-slate-400 uppercase tracking-widest shrink-0">
+          Acompanhamento Trinus .co
+        </div>
+      `;
+    }
+
+    function renderSidebarTimeline() {
+      const items = S.history
+        .filter(h => h.periodId === S.currentPeriodId)
+        .filter(h => !S.sidebarSearch ||
+          h.projectName.toLowerCase().includes(S.sidebarSearch.toLowerCase()) ||
+          h.deliveryName.toLowerCase().includes(S.sidebarSearch.toLowerCase()));
+
+      if (items.length === 0) return `
+        <div class="flex flex-col items-center justify-center h-48 text-slate-400">
+          <div class="text-4xl mb-3">📋</div>
+          <p class="text-sm font-medium text-slate-600">Nenhum registro ainda</p>
+          <p class="text-xs mt-1">Marque células para ver o histórico aqui</p>
+        </div>
+      `;
+
+      return `
+        <div class="relative border-l border-slate-100 pl-6 ml-3 space-y-5">
+          ${items.map(h => `
+            <div class="relative">
+              <div class="absolute -left-[31px] top-1.5 w-2.5 h-2.5 rounded-full ring-4 ring-white ${h.action==='delivered'?'bg-emerald-500':h.action==='delivered_warn'?'bg-amber-500':'bg-slate-400'}"></div>
+              <div class="mono text-[10px] text-slate-400 mb-0.5">${fmtTs(h.changedAt)}</div>
+              <div class="text-sm font-bold text-slate-800">${h.projectName}</div>
+              <div class="flex items-center gap-2 mt-0.5">
+                <span class="text-xs text-slate-500">${h.deliveryName}</span>
+                <span class="mono text-[10px] font-bold px-1.5 py-0.5 rounded ${h.action==='delivered'?'bg-emerald-100 text-emerald-700':h.action==='delivered_warn'?'bg-amber-100 text-amber-700':'bg-slate-100 text-slate-500'}">
+                  ${h.action==='delivered'?'✓ Entregue':h.action==='delivered_warn'?'✓ Entregue (amarelo)':'↩ Desmarcado'}
+                </span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function renderSidebarCharts() {
+      const snaps = S.snapshots;
+      const { meta, delivered, pct } = calcTotals();
+      const weeklySnaps = snaps.filter(s => s.isWeekly);
+
+      const W=440, H=200, PAD={t:16,r:16,b:32,l:36};
+      const cW=W-PAD.l-PAD.r, cH=H-PAD.t-PAD.b;
+      const xs = i => PAD.l + (snaps.length>1?(i/(snaps.length-1))*cW:cW/2);
+      const ys = v => PAD.t + cH - (v/100)*cH;
+      const pts  = snaps.map((s,i)=>`${xs(i)},${ys(s.percent)}`).join(' ');
+      const area = snaps.length>0?`${xs(0)},${ys(0)} ${pts} ${xs(snaps.length-1)},${ys(0)}`:'';
+      const last  = snaps[snaps.length-1];
+      const first = snaps[0];
+      const delta = snaps.length>1 ? last.percent-first.percent : 0;
+
+      return `
+        <div class="space-y-5">
+          <div class="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between">
+            <div>
+              <p class="mono text-[10px] uppercase tracking-[0.2em] text-slate-400">Progresso Atual</p>
+              <h4 class="text-4xl font-extrabold mt-1 flex items-baseline gap-2">
+                ${pct}% <span class="text-xs font-normal text-emerald-400">${delivered} de ${meta} OK</span>
+              </h4>
+            </div>
+            <div class="text-right">
+              <p class="mono text-[10px] text-slate-400 uppercase">Evolução</p>
+              <p class="text-sm font-bold text-slate-200 mt-1">${delta>=0?'+':''}${delta}pp</p>
+            </div>
+          </div>
+
+          ${weeklySnaps.length > 0 ? `
+            <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-4">
+              <h5 class="mono text-[10px] font-bold text-indigo-700 uppercase tracking-widest mb-3">📅 Checkpoints Semanais</h5>
+              <div class="space-y-2">
+                ${weeklySnaps.map((s,i) => {
+                  const prev = weeklySnaps[i-1];
+                  const diff = prev ? s.percent - prev.percent : null;
+                  return `
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center gap-2">
+                        <div class="w-2 h-2 rounded-full bg-indigo-500"></div>
+                        <span class="text-sm font-bold text-indigo-900">${s.weekName || 'Semana'}</span>
+                        <span class="mono text-[9px] text-indigo-400">${fmtDate(s.date)}</span>
+                      </div>
+                      <div class="flex items-center gap-2">
+                        ${diff!==null?`<span class="mono text-[10px] font-bold ${diff>=0?'text-emerald-600':'text-rose-500'}">${diff>=0?'+':''}${diff}pp</span>`:''}
+                        <span class="mono text-sm font-extrabold text-indigo-700">${s.percent}%</span>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          ` : S.isEditor ? `<p class="text-xs text-slate-400 text-center py-2">Use "Fechar Semana" para criar checkpoints semanais</p>` : ''}
+
+          ${snaps.length >= 2 ? `
+            <div class="bg-white border border-slate-100 rounded-2xl p-4 shadow-sm">
+              <h5 class="mono text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-4">📈 Curva de Evolução</h5>
+              <svg viewBox="0 0 ${W} ${H}" class="w-full h-auto overflow-visible">
+                <defs>
+                  <linearGradient id="aG" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.2"/>
+                    <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+                  </linearGradient>
+                </defs>
+                ${[0,25,50,75,100].map(v=>`
+                  <line x1="${PAD.l}" y1="${ys(v)}" x2="${W-PAD.r}" y2="${ys(v)}" stroke="#f1f5f9" stroke-dasharray="3 3"/>
+                  <text x="${PAD.l-6}" y="${ys(v)+3}" text-anchor="end" font-size="9" fill="#94a3b8" font-family="JetBrains Mono,monospace">${v}%</text>
+                `).join('')}
+                ${area?`<polygon points="${area}" fill="url(#aG)"/>`:''}
+                <polyline points="${pts}" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+                ${snaps.map((s,i)=>{
+                  const isW = s.isWeekly;
+                  return `
+                    <circle cx="${xs(i)}" cy="${ys(s.percent)}" r="${isW?6:3.5}" fill="${isW?'#6366f1':'#2563eb'}" stroke="white" stroke-width="2"/>
+                    ${isW?`<text x="${xs(i)}" y="${ys(s.percent)-10}" text-anchor="middle" font-size="8" fill="#6366f1" font-family="JetBrains Mono,monospace">${s.weekName}</text>`:''}
+                    ${i===0||i===snaps.length-1?`<text x="${xs(i)}" y="${H-PAD.b+14}" text-anchor="middle" font-size="8" fill="#94a3b8" font-family="JetBrains Mono,monospace">${fmtDate(s.date)}</text>`:''}
+                  `;
+                }).join('')}
+              </svg>
+            </div>
+          ` : `<p class="text-xs text-slate-400 text-center py-8">Marque células para gerar dados de evolução</p>`}
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="p-4 bg-slate-50 border border-slate-100 rounded-xl">
+              <div class="mono text-[10px] uppercase text-slate-400 font-bold">Alterações</div>
+              <div class="text-2xl font-extrabold text-slate-800 mt-1">${S.history.filter(h=>h.periodId===S.currentPeriodId).length}</div>
+              <p class="text-[10px] text-slate-500 mt-1">Registros no período</p>
+            </div>
+            <div class="p-4 bg-slate-50 border border-slate-100 rounded-xl">
+              <div class="mono text-[10px] uppercase text-slate-400 font-bold">Checkpoints</div>
+              <div class="text-2xl font-extrabold text-indigo-700 mt-1">${weeklySnaps.length}</div>
+              <p class="text-[10px] text-slate-500 mt-1">Semanas fechadas</p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSidebarProjects() {
+      const items = S.projects
+        .map(proj => {
+          let meta=0,delivered=0;
+          S.deliveries.forEach(d => {
+            const s=getStatus(proj.id,d.id);
+            if(s!=='na') meta++;
+            if(isDone(s)) delivered++;
+          });
+          return { proj, meta, delivered, pct: meta>0?Math.round((delivered/meta)*100):0 };
+        })
+        .filter(it => !S.sidebarSearch || it.proj.name.toLowerCase().includes(S.sidebarSearch.toLowerCase()))
+        .sort((a,b) => b.pct-a.pct);
+
+      if (items.length === 0) return `<div class="flex flex-col items-center justify-center h-48 text-slate-400"><div class="text-4xl mb-3">🔍</div><p class="text-sm">Obra não encontrada</p></div>`;
+
+      return `
+        <div class="space-y-2.5">
+          <p class="mono text-[10px] text-slate-400 uppercase tracking-wider">Progresso por Obra — ${S.period?.name||''}</p>
+          ${items.map(({proj,meta,delivered,pct}) => `
+            <div class="p-4 bg-white hover:bg-slate-50 border border-slate-100 hover:border-slate-200 rounded-xl transition-all shadow-sm">
+              <div class="flex items-center justify-between mb-2">
+                <div>
+                  <span class="font-bold text-slate-800 text-sm">${proj.name}</span>
+                  <span class="mono text-[9px] font-bold bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded ml-2 uppercase">${proj.type}</span>
+                </div>
+                <span class="mono text-sm font-extrabold ${pct===100?'text-emerald-600':'text-slate-700'}">${pct}%</span>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="h-2 flex-1 bg-slate-100 rounded-full overflow-hidden">
+                  <div style="width:${pct}%" class="h-full rounded-full transition-all ${pct===100?'bg-emerald-500':pct>40?'bg-blue-500':'bg-amber-500'}"></div>
+                </div>
+                <span class="mono text-[10px] text-slate-400">${delivered}/${meta}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    window._sidebarTab    = t  => { S.sidebarTab=t; S.sidebarSearch=''; renderSidebar(); };
+    window._sidebarSearch = v  => { S.sidebarSearch=v; renderSidebar(); };
+
+    // ═══════════════════════════════════════════════════════
+    // EVENTOS
+    // ═══════════════════════════════════════════════════════
+    function attachEvents() {
+      document.getElementById('period-sel')?.addEventListener('change', e => switchPeriod(e.target.value));
+      document.getElementById('btn-new-period')?.addEventListener('click', () => showSetupModal(null));
+      document.getElementById('btn-new-period-empty')?.addEventListener('click', () => showSetupModal(null));
+      document.getElementById('btn-edit-period')?.addEventListener('click', () => showSetupModal(S.period));
+      document.getElementById('btn-weekly')?.addEventListener('click', showWeeklyModal);
+      document.getElementById('btn-admin')?.addEventListener('click', () => showAdminModal('projects'));
+      document.getElementById('btn-manual')?.addEventListener('click', () => showManualModal(0));
+      document.getElementById('btn-late')?.addEventListener('click', () => { S.showLateOnly=!S.showLateOnly; render(); });
+      document.getElementById('btn-sidebar')?.addEventListener('click', openSidebar);
+      document.getElementById('btn-login')?.addEventListener('click', showPasswordModal);
+      document.getElementById('btn-logout')?.addEventListener('click', logout);
+      document.getElementById('btn-view-matrix')?.addEventListener('click', () => { S.view='matrix'; render(); });
+      document.getElementById('btn-view-dashboard')?.addEventListener('click', () => { S.view='dashboard'; render(); });
+      document.getElementById('btn-export')?.addEventListener('click', () => window._exportarPng());
+
+      document.querySelectorAll('[data-dash-expand]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const key = btn.dataset.dashExpand;
+          S.dashExpanded[key] = !S.dashExpanded[key];
+          render();
+        });
+      });
+
+      document.querySelectorAll('.sector-btn').forEach(btn => {
+        btn.addEventListener('click', () => { S.sectorFilter=btn.dataset.sector; render(); });
+      });
+
+      document.querySelectorAll('.cell[data-pid]').forEach(cell => {
+        cell.addEventListener('click', () => {
+          if (!S.isEditor) { showPasswordModal(); return; }
+          toggleDelivery(cell.dataset.pid, cell.dataset.did);
+        });
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // UTILS
+    // ═══════════════════════════════════════════════════════
+    function setModal(html)    { document.getElementById('modal-root').innerHTML = html; }
+    window.closeModal = ()     => { document.getElementById('modal-root').innerHTML = ''; };
+
+    function fmtDate(d) {
+      if (!d) return '';
+      const p = d.split('-');
+      return `${p[2]}/${p[1]}`;
+    }
+    function fmtTs(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return d.toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+    }
+
+    // ═══════════════════════════════════════════════════════
+    // INIT
+    // ═══════════════════════════════════════════════════════
+    initEditor();
+    await seedIfEmpty();
+
+    // migração pontual: renomeia FAROL ATIV. → FAROL CONT.
+    (async () => {
+      const d14Ref = doc(db, 'deliveries', 'd14');
+      const d14Snap = await getDoc(d14Ref);
+      if (d14Snap.exists() && d14Snap.data().name === 'FAROL ATIV.') {
+        await setDoc(d14Ref, { ...d14Snap.data(), name: 'FAROL CONT.', full: 'Gestão à Vista — Farol de Controle' });
+      }
+    })();
+
+    startListeners();
+    setTimeout(scheduleDailySnapshot, 8000);
+  </script>
+</body>
+</html>
