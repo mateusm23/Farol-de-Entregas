@@ -173,7 +173,8 @@
       sidebarTab:      'timeline',
       sidebarSearch:   '',
       projects:        [],
-      deliveries:      [],
+      deliveries:      [],   // etapas do período atual, com os 2º prazos
+      deliveriesBase:  [],   // etapas cadastradas no banco
       groups:          [],
       periods:         [],
       currentPeriodId: null,
@@ -190,15 +191,28 @@
     function groupColor(name) { return getGroup(name)?.color || 'slate'; }
     // Agrupa as entregas na ordem dos grupos configurados; entregas cujo grupo foi removido
     // caem em "Outros" para nunca ficarem escondidas silenciosamente.
-    function groupedDeliveries() {
+    function groupedDeliveries(lista = S.deliveries) {
       const usedNames = new Set(S.groups.map(g => g.name));
       const known = S.groups
-        .map(g => ({ group: g, items: S.deliveries.filter(d => d.kr === g.name) }))
+        .map(g => ({ group: g, items: lista.filter(d => d.kr === g.name) }))
         .filter(k => k.items.length > 0);
-      const orphans = S.deliveries.filter(d => !usedNames.has(d.kr));
+      const orphans = lista.filter(d => !usedNames.has(d.kr));
       if (orphans.length) known.push({ group: { id: '_orphan', name: 'Outros', color: 'slate' }, items: orphans });
       return known;
     }
+
+    // Etapas de um período: a base mais o 2º prazo de cada etapa que tiver (id "d1__2", logo depois da base).
+    // O 2º prazo é uma coluna a mais só daquele período, então status, cobranças e totais funcionam em cada coluna.
+    function entregasDe(per) {
+      const ex = per?.extras || {};
+      return S.deliveriesBase.flatMap(d => [d, ...Object.entries(ex)
+        .filter(([, e]) => e && e.base === d.id)
+        .map(([id]) => ({ ...d, id, virtual: true, base: d.id }))]);
+    }
+    function refreshEntregas() { S.deliveries = entregasDe(S.period); }
+    const temBlocos = d => !!S.period?.extras?.[(d.virtual ? d.base : d.id) + '__2'];
+    const ordemBloco = d => (d.virtual ? 2 : 1);
+    function nomeEtapa(d) { return d.full + (temBlocos(d) ? ' · ' + fmtDate(S.period.deliveries?.[d.id]) : ''); }
 
     // ═══════════════════════════════════════════════════════
     // STATUS LOGIC
@@ -314,7 +328,8 @@
 
       unsubDeliveries?.();
       unsubDeliveries = onSnapshot(query(collection(db, C('deliveries')), orderBy('order', 'asc')), snap => {
-        S.deliveries = snap.docs.map(d => d.data());
+        S.deliveriesBase = snap.docs.map(d => d.data());
+        refreshEntregas();
         S.loaded.deliveries = true;
         renderIfReady();
       });
@@ -337,6 +352,7 @@
           S.currentPeriodId = primary?.id ?? S.periods[0]?.id ?? null;
         }
         S.period = S.periods.find(p => p.id === S.currentPeriodId) ?? null;
+        refreshEntregas();
         renderIfReady();
         refreshSnapshots();
       });
@@ -383,6 +399,7 @@
     function switchPeriod(id) {
       S.currentPeriodId = id;
       S.period = S.periods.find(p => p.id === id) ?? null;
+      refreshEntregas();
       refreshSnapshots();
       render();
     }
@@ -437,23 +454,30 @@
     // ═══════════════════════════════════════════════════════
     // MODAL PERÍODO
     // ═══════════════════════════════════════════════════════
+    let SETUP_ABORT = null;
     function showSetupModal(existing) {
       const isNew = !existing;
-      const p = existing ? { ...existing } : {
-        id: `per_${Date.now()}`, name: '', startDate: '', endDate: '',
-        deliveries: {}, scope: {},
-      };
-      if (isNew) {
-        S.projects.forEach(proj => { p.scope[proj.id] = []; });
-      }
-      // Novo período: já nasce copiando o escopo do período mais recente (os prazos não são copiados)
-      const periodsByRecent = [...S.periods].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
       const MESES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+      const pad = n => String(n).padStart(2, '0');
+      // Estado do rascunho: o modal é redesenhado quando se adiciona ou remove um 2º prazo
+      const E = {
+        p: existing
+          ? { ...existing, deliveries: { ...(existing.deliveries || {}) }, scope: { ...(existing.scope || {}) } }
+          : { id: `per_${Date.now()}`, name: '', startDate: '', endDate: '', deliveries: {}, scope: {} },
+        extras: { ...(existing?.extras || {}) },   // { 'd1__2': { base: 'd1' } }: etapas com 2º prazo
+        diasExtras: {},                            // dia do mês do 2º prazo, vindo do período copiado
+        lastSuggestion: { name: '', startDate: '', endDate: '' },
+        lastPrazos: {},
+        copiaDe: null,
+      };
+      const p = E.p;
+      if (isNew) S.projects.forEach(proj => { p.scope[proj.id] = []; });
+
+      const periodsByRecent = [...S.periods].sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
       const suggestFrom = src => {
         const [y, m] = (src?.startDate || '').split('-').map(Number);
         if (!y || !m) return { name: '', startDate: '', endDate: '' };
         const ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1; // nm é 1 a 12
-        const pad = n => String(n).padStart(2, '0');
         return {
           name: `${MESES[nm - 1]} ${ny}`,
           startDate: `${ny}-${pad(nm)}-01`,
@@ -465,25 +489,115 @@
         S.projects.forEach(proj => { sc[proj.id] = [...(src?.scope?.[proj.id] || [])]; });
         return sc;
       };
-      if (isNew && periodsByRecent.length) {
-        const first = periodsByRecent[0];
-        Object.assign(p, suggestFrom(first), { scope: scopeFrom(first) });
-      }
-      let lastSuggestion = isNew ? { name: p.name, startDate: p.startDate, endDate: p.endDate } : null;
-      // Prazos padrão: cada etapa tem um dia fixo do mês (campo day), aplicado ao mês de início do período
+      const draft = () => entregasDe({ extras: E.extras });   // etapas do rascunho, com os 2º prazos
+
+      // Prazos padrão: cada etapa tem um dia fixo do mês (campo day), aplicado ao mês de início do período.
+      // Um 2º prazo copiado de outro período mantém o mesmo dia do mês.
       const defaultPrazos = start => {
         const [y, m] = (start || '').split('-').map(Number);
         if (!y || !m) return {};
-        const last = new Date(y, m, 0).getDate(), pad = n => String(n).padStart(2, '0');
+        const last = new Date(y, m, 0).getDate();
         const o = {};
-        S.deliveries.forEach(d => { if (d.day) o[d.id] = `${y}-${pad(m)}-${pad(Math.min(d.day, last))}`; });
+        draft().forEach(d => {
+          const dia = d.virtual ? E.diasExtras[d.id] : d.day;
+          if (dia) o[d.id] = `${y}-${pad(m)}-${pad(Math.min(dia, last))}`;
+        });
         return o;
       };
-      let lastPrazos = isNew ? defaultPrazos(p.startDate) : {};
-      if (isNew) Object.assign(p.deliveries, lastPrazos);
-      const groups = groupedDeliveries();
+      // Traz o escopo e os 2º prazos de outro período
+      const aplicarOrigem = src => {
+        E.extras = {}; E.diasExtras = {};
+        Object.entries(src?.extras || {}).forEach(([id, e]) => {
+          if (e && S.deliveriesBase.some(d => d.id === e.base)) {
+            E.extras[id] = { base: e.base };
+            const dia = Number(String(src.deliveries?.[id] || '').slice(8, 10));
+            if (dia) E.diasExtras[id] = dia;
+          }
+        });
+        const validos = new Set(draft().map(d => d.id));
+        p.scope = scopeFrom(src);
+        S.projects.forEach(pr => { p.scope[pr.id] = p.scope[pr.id].filter(id => validos.has(id)); });
+      };
+      if (isNew && periodsByRecent.length) {
+        const first = periodsByRecent[0];
+        aplicarOrigem(first);
+        const sug = suggestFrom(first);
+        Object.assign(p, sug);
+        E.lastSuggestion = sug;
+        E.copiaDe = first.id;
+      }
+      if (isNew) { E.lastPrazos = defaultPrazos(p.startDate); Object.assign(p.deliveries, E.lastPrazos); }
 
-      setModal(`
+      // Guarda no rascunho o que está digitado e marcado na tela antes de redesenhar
+      const capturar = () => {
+        const el = id => document.getElementById(id);
+        if (!el('scope-table')) return;
+        p.name = el('s-name').value; p.startDate = el('s-start').value; p.endDate = el('s-end').value;
+        const lista = draft();
+        lista.forEach(d => { const i = el(`dl-${d.id}`); if (i) p.deliveries[d.id] = i.value; });
+        S.projects.forEach(pr => { p.scope[pr.id] = lista.filter(d => el(`sc-${pr.id}-${d.id}`)?.checked).map(d => d.id); });
+      };
+      // Uma obra fica em um prazo só: marcar no 2º desmarca no 1º, e o contrário
+      const irmao = dId => dId.endsWith('__2') ? dId.slice(0, -3) : (E.extras[dId + '__2'] ? dId + '__2' : null);
+      const marcar = (pId, dId, v) => {
+        const el = document.getElementById(`sc-${pId}-${dId}`);
+        if (!el) return;
+        el.checked = v;
+        if (v) { const i = irmao(dId); const ie = i && document.getElementById(`sc-${pId}-${i}`); if (ie) ie.checked = false; }
+      };
+      const box = (pId, dId) => document.getElementById(`sc-${pId}-${dId}`);
+
+      const anexarArrastar = () => {
+        if (SETUP_ABORT) SETUP_ABORT.abort();
+        SETUP_ABORT = new AbortController();
+        const sig = { signal: SETUP_ABORT.signal };
+        const table = document.getElementById('scope-table');
+        let painting = null, last = null;   // painting: true ou false enquanto o mouse está pressionado
+        const paint = td => { if (td && painting !== null) marcar(td.dataset.p, td.dataset.d, painting); };
+        table.addEventListener('mousedown', e => {
+          if (e.button !== 0) return;
+          last = { x: e.clientX, y: e.clientY };
+          const cell = e.target.closest('[data-cell]');
+          if (cell) {
+            painting = !box(cell.dataset.p, cell.dataset.d).checked;
+            paint(cell);
+            e.preventDefault();
+            return;
+          }
+          const row = e.target.closest('[data-row]');
+          if (row) {
+            const pid = row.dataset.row, lista = draft(), bases = lista.filter(d => !d.virtual);
+            const coberta = d => box(pid, d.id)?.checked || (irmao(d.id) && box(pid, irmao(d.id))?.checked);
+            if (bases.every(coberta)) lista.forEach(d => marcar(pid, d.id, false));
+            else bases.forEach(d => marcar(pid, d.id, true));
+          }
+          const col = e.target.closest('[data-col]');
+          if (col) {
+            const todos = S.projects.every(pr => box(pr.id, col.dataset.col)?.checked);
+            S.projects.forEach(pr => marcar(pr.id, col.dataset.col, !todos));
+          }
+        }, sig);
+        // Percorre a reta entre duas posições do mouse, para não pular células em movimentos rápidos
+        const paintLine = (x0, y0, x1, y1) => {
+          const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
+          for (let i = 1; i <= steps; i++) {
+            const el = document.elementFromPoint(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
+            paint(el && el.closest('[data-cell]'));
+          }
+        };
+        document.addEventListener('mousemove', e => {
+          if (painting === null || !last) return;
+          paintLine(last.x, last.y, e.clientX, e.clientY);
+          last = { x: e.clientX, y: e.clientY };
+        }, sig);
+        document.addEventListener('mouseup', () => { painting = null; last = null; }, sig);
+      };
+
+      const desenhar = () => {
+        const lista = draft();
+        const groups = groupedDeliveries(lista);
+        const comBlocos = lista.some(d => d.virtual);
+        setModal(`
         <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[300] p-4">
           <div class="bg-white rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 fade-in">
             <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
@@ -496,41 +610,55 @@
                   <label class="mono text-[10px] font-bold text-blue-700 uppercase tracking-widest">Copiar escopo de</label>
                   <select id="s-copy" onchange="window._copyFrom(this.value)"
                     class="bg-white border border-blue-200 rounded-lg px-3 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-blue-500">
-                    ${periodsByRecent.map((pp, i) => `<option value="${pp.id}" ${i === 0 ? 'selected' : ''}>${pp.name}</option>`).join('')}
-                    <option value="">Nenhum (começar vazio)</option>
+                    ${periodsByRecent.map(pp => `<option value="${pp.id}" ${pp.id === E.copiaDe ? 'selected' : ''}>${esc(pp.name)}</option>`).join('')}
+                    <option value="" ${E.copiaDe === '' ? 'selected' : ''}>Nenhum (começar vazio)</option>
                   </select>
-                  <span class="text-xs text-slate-500">Traz só as marcações de obra e etapa. Os prazos vêm dos dias padrão da MFO.</span>
+                  <span class="text-xs text-slate-500">Traz as marcações de obra e etapa e os 2º prazos. Os prazos vêm dos dias padrão da MFO.</span>
                 </div>
               ` : ''}
               <div class="grid grid-cols-3 gap-4">
                 <div>
                   <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Nome</label>
-                  <input id="s-name" value="${p.name}" placeholder="ex: Junho 2025"
+                  <input id="s-name" value="${esc(p.name)}" placeholder="ex: Junho 2025"
                     class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
                 </div>
                 <div>
                   <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Início</label>
-                  <input id="s-start" type="date" value="${p.startDate}" onchange="window._startChanged()"
+                  <input id="s-start" type="date" value="${esc(p.startDate)}" onchange="window._startChanged()"
                     class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
                 </div>
                 <div>
                   <label class="block mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5">Fim</label>
-                  <input id="s-end" type="date" value="${p.endDate}"
+                  <input id="s-end" type="date" value="${esc(p.endDate)}"
                     class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5 text-sm outline-none focus:border-blue-500">
                 </div>
               </div>
 
               <div>
-                <h3 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Prazos das entregas</h3>
+                <h3 class="mono text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Prazos das entregas</h3>
+                <p class="text-[11px] text-slate-400 mb-3">Para obras com outro calendário, clique no <strong>+</strong> da etapa, informe o 2º prazo e marque na grade as obras desse prazo.</p>
                 <div class="grid grid-cols-2 gap-x-8 gap-y-2.5">
-                  ${S.deliveries.map(d => `
-                    <div class="flex items-center gap-3">
-                      <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(d.kr)}-100 text-${groupColor(d.kr)}-700">${d.kr}</span>
-                      <span class="text-xs text-slate-500 flex-1 truncate">${d.full}</span>
-                      <input id="dl-${d.id}" type="date" value="${p.deliveries[d.id]||''}"
-                        class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs outline-none focus:border-blue-500 w-36">
-                    </div>
-                  `).join('')}
+                  ${S.deliveriesBase.map(d => {
+                    const id2 = d.id + '__2', tem = !!E.extras[id2];
+                    return `
+                    <div class="space-y-1.5">
+                      <div class="flex items-center gap-3">
+                        <span class="mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-${groupColor(d.kr)}-100 text-${groupColor(d.kr)}-700">${esc(d.kr)}</span>
+                        <span class="text-xs text-slate-500 flex-1 truncate">${esc(d.full)}</span>
+                        <input id="dl-${d.id}" type="date" value="${esc(p.deliveries[d.id] || '')}"
+                          class="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs outline-none focus:border-blue-500 w-36">
+                        ${tem ? '<span class="w-6"></span>' : `<button onclick="window._addBloco('${d.id}')" title="Adicionar um 2º prazo para outras obras" class="w-6 h-6 rounded-md border border-slate-200 text-slate-500 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 text-sm leading-none">+</button>`}
+                      </div>
+                      ${tem ? `
+                      <div class="flex items-center gap-3 pl-3 ml-1 border-l-2 border-blue-300">
+                        <span class="mono text-[9px] font-bold text-blue-600 uppercase tracking-wider">2º prazo</span>
+                        <span class="text-[11px] text-slate-400 flex-1 truncate">Marque abaixo as obras deste prazo</span>
+                        <input id="dl-${id2}" type="date" value="${esc(p.deliveries[id2] || '')}"
+                          class="bg-blue-50/50 border border-blue-200 rounded-lg px-2 py-1 text-xs outline-none focus:border-blue-500 w-36">
+                        <button onclick="window._removeBloco('${d.id}')" title="Remover o 2º prazo (as obras voltam para o 1º)" class="w-6 h-6 rounded-md border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 text-xs leading-none">✕</button>
+                      </div>` : ''}
+                    </div>`;
+                  }).join('')}
                 </div>
               </div>
 
@@ -548,26 +676,28 @@
                       <tr class="bg-slate-50">
                         <th class="text-left px-3 py-2 text-slate-400 font-medium sticky left-0 bg-slate-50 min-w-48">Obra</th>
                         ${groups.map(({group, items}) => `
-                          <th colspan="${items.length}" class="text-center py-1.5 mono text-[9px] font-bold text-${group.color}-600 tracking-widest border-b border-${group.color}-100">${group.name}</th>
+                          <th colspan="${items.length}" class="text-center py-1.5 mono text-[9px] font-bold text-${group.color}-600 tracking-widest border-b border-${group.color}-100">${esc(group.name)}</th>
                         `).join('')}
                       </tr>
                       <tr class="bg-slate-50 border-b border-slate-100">
                         <th class="sticky left-0 bg-slate-50 px-3 py-1"></th>
-                        ${S.deliveries.map(d => `
-                          <th class="px-1 py-1 text-center cursor-pointer hover:bg-blue-50" style="min-width:44px" data-col="${d.id}" title="Clique para marcar ou desmarcar a coluna inteira">
-                            <span class="text-slate-400 font-normal" style="writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block;height:65px;font-size:9px">${d.name}</span>
-                          </th>
-                        `).join('')}
+                        ${lista.map(d => {
+                          const tem = d.virtual || E.extras[d.id + '__2'];
+                          return `
+                          <th class="px-1 py-1 text-center cursor-pointer hover:bg-blue-50 ${d.virtual ? 'bg-blue-50/60' : ''}" style="min-width:44px${d.virtual ? ';border-left:2px dashed #93c5fd' : ''}" data-col="${d.id}" title="Clique para marcar ou desmarcar a coluna inteira">
+                            <span class="${d.virtual ? 'text-blue-600 font-semibold' : 'text-slate-400 font-normal'}" style="writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block;height:${comBlocos ? 96 : 65}px;font-size:9px">${esc(d.name)}${tem ? (d.virtual ? ' · 2º prazo' : ' · 1º prazo') : ''}</span>
+                          </th>`;
+                        }).join('')}
                       </tr>
                     </thead>
                     <tbody>
                       ${['Gerenciamento','Construção'].flatMap(type => [
-                        `<tr><td colspan="${S.deliveries.length+1}" class="px-3 py-1 mono text-[9px] uppercase tracking-widest text-slate-400 bg-slate-50 font-bold">${type}</td></tr>`,
+                        `<tr><td colspan="${lista.length+1}" class="px-3 py-1 mono text-[9px] uppercase tracking-widest text-slate-400 bg-slate-50 font-bold">${type}</td></tr>`,
                         ...S.projects.filter(pr=>pr.type===type).map(proj=>`
                           <tr class="border-b border-slate-50 hover:bg-blue-50/30">
-                            <td class="sticky left-0 bg-white hover:bg-blue-50/30 px-3 py-1.5 text-slate-700 whitespace-nowrap font-medium cursor-pointer" data-row="${proj.id}" title="Clique para marcar ou desmarcar a linha inteira">${proj.name}</td>
-                            ${S.deliveries.map(d=>`
-                              <td class="px-1 py-1 text-center cursor-pointer" data-cell="sc-${proj.id}-${d.id}">
+                            <td class="sticky left-0 bg-white hover:bg-blue-50/30 px-3 py-1.5 text-slate-700 whitespace-nowrap font-medium cursor-pointer" data-row="${proj.id}" title="Clique para marcar ou desmarcar a linha inteira">${esc(proj.name)}</td>
+                            ${lista.map(d=>`
+                              <td class="px-1 py-1 text-center cursor-pointer ${d.virtual ? 'bg-blue-50/40' : ''}" ${d.virtual ? 'style="border-left:2px dashed #93c5fd"' : ''} data-cell="sc-${proj.id}-${d.id}" data-p="${proj.id}" data-d="${d.id}">
                                 <input type="checkbox" id="sc-${proj.id}-${d.id}" style="pointer-events:none"
                                   ${(p.scope[proj.id]||[]).includes(d.id)?'checked':''}
                                   class="w-3.5 h-3.5 rounded accent-blue-600 cursor-pointer">
@@ -599,89 +729,71 @@
           </div>
         </div>
       `);
+        anexarArrastar();
+      };
 
       window._startChanged = () => {
         const np = defaultPrazos(document.getElementById('s-start').value);
-        S.deliveries.forEach(d => {
+        draft().forEach(d => {
           const el = document.getElementById(`dl-${d.id}`);
-          if (el && (!el.value || el.value === lastPrazos[d.id])) el.value = np[d.id] || '';
+          if (el && (!el.value || el.value === E.lastPrazos[d.id])) el.value = np[d.id] || '';
         });
-        lastPrazos = np;
+        E.lastPrazos = np;
       };
       window._copyFrom = srcId => {
+        capturar();
         const src = S.periods.find(x => x.id === srcId);
-        const sc = scopeFrom(src);
-        S.projects.forEach(pr => S.deliveries.forEach(d => {
-          const el = document.getElementById(`sc-${pr.id}-${d.id}`);
-          if (el) el.checked = sc[pr.id].includes(d.id);
-        }));
-        // Só troca nome e datas se ainda forem a última sugestão (ou estiverem vazios)
         const sug = src ? suggestFrom(src) : { name: '', startDate: '', endDate: '' };
-        [['s-name', 'name'], ['s-start', 'startDate'], ['s-end', 'endDate']].forEach(([elId, k]) => {
-          const el = document.getElementById(elId);
-          if (el && (!el.value || el.value === lastSuggestion[k])) el.value = sug[k];
-        });
-        lastSuggestion = sug;
-        window._startChanged();
+        // Só troca nome e datas se ainda forem a última sugestão (ou estiverem vazios)
+        ['name', 'startDate', 'endDate'].forEach(k => { if (!p[k] || p[k] === E.lastSuggestion[k]) p[k] = sug[k]; });
+        E.lastSuggestion = sug; E.copiaDe = srcId;
+        aplicarOrigem(src);
+        const np = defaultPrazos(p.startDate);
+        draft().forEach(d => { if (!p.deliveries[d.id] || p.deliveries[d.id] === E.lastPrazos[d.id]) p.deliveries[d.id] = np[d.id] || ''; });
+        E.lastPrazos = np;
+        desenhar();
       };
-      // Clicar e arrastar: a primeira célula define o estado (marcar ou desmarcar) aplicado às demais
-      {
-        const table = document.getElementById('scope-table');
-        const box = id => document.getElementById(id);
-        let painting = null; // true/false enquanto o mouse está pressionado
-        const paint = td => { const el = td && box(td.dataset.cell); if (el) el.checked = painting; };
-        const toggleGroup = ids => {
-          const els = ids.map(box).filter(Boolean);
-          const all = els.every(e => e.checked);
-          els.forEach(e => { e.checked = !all; });
-        };
-        table.addEventListener('mousedown', e => {
-          if (e.button !== 0) return;
-          const cell = e.target.closest('[data-cell]');
-          if (cell) {
-            painting = !box(cell.dataset.cell).checked;
-            paint(cell);
-            e.preventDefault();
-            return;
-          }
-          const row = e.target.closest('[data-row]');
-          if (row) toggleGroup(S.deliveries.map(d => `sc-${row.dataset.row}-${d.id}`));
-          const col = e.target.closest('[data-col]');
-          if (col) toggleGroup(S.projects.map(pr => `sc-${pr.id}-${col.dataset.col}`));
+      window._addBloco = baseId => {
+        capturar();
+        const id2 = baseId + '__2';
+        E.extras[id2] = { base: baseId };
+        p.deliveries[id2] = '';
+        desenhar();
+        setTimeout(() => document.getElementById(`dl-${id2}`)?.focus(), 50);
+      };
+      window._removeBloco = baseId => {
+        capturar();
+        const id2 = baseId + '__2';
+        // As obras do 2º prazo voltam para o 1º, para ninguém perder a etapa
+        S.projects.forEach(pr => { p.scope[pr.id] = [...new Set((p.scope[pr.id] || []).map(id => id === id2 ? baseId : id))]; });
+        delete E.extras[id2]; delete p.deliveries[id2]; delete E.diasExtras[id2];
+        desenhar();
+      };
+      window._toggleAll = v => {
+        const lista = draft();
+        S.projects.forEach(pr => {
+          if (v) lista.filter(d => !d.virtual).forEach(d => marcar(pr.id, d.id, true));
+          else lista.forEach(d => marcar(pr.id, d.id, false));
         });
-        // Percorre a reta entre duas posições do mouse, para não pular células em movimentos rápidos
-        let last = null;
-        const paintLine = (x0, y0, x1, y1) => {
-          const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
-          for (let i = 1; i <= steps; i++) {
-            const el = document.elementFromPoint(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps);
-            paint(el && el.closest('[data-cell]'));
-          }
-        };
-        table.addEventListener('mousedown', e => { last = { x: e.clientX, y: e.clientY }; });
-        document.addEventListener('mousemove', e => {
-          if (painting === null || !last) return;
-          paintLine(last.x, last.y, e.clientX, e.clientY);
-          last = { x: e.clientX, y: e.clientY };
-        });
-        document.addEventListener('mouseup', () => { painting = null; last = null; });
-      }
-      window._toggleAll = v => S.projects.forEach(pr => S.deliveries.forEach(d => {
-        const el = document.getElementById(`sc-${pr.id}-${d.id}`); if (el) el.checked = v;
-      }));
+      };
       window._savePeriod = async id => {
-        const name = document.getElementById('s-name').value.trim();
-        const startDate = document.getElementById('s-start').value;
-        const endDate   = document.getElementById('s-end').value;
-        if (!name||!startDate||!endDate) { alert('Preencha nome, início e fim.'); return; }
+        capturar();
+        const name = p.name.trim();
+        if (!name || !p.startDate || !p.endDate) { alert('Preencha nome, início e fim.'); return; }
+        const lista = draft();
+        const semData = lista.find(d => d.virtual && !p.deliveries[d.id]);
+        if (semData) { alert(`Informe a data do 2º prazo de "${semData.full}".`); return; }
         const deliveries = {};
-        S.deliveries.forEach(d => { const v = document.getElementById(`dl-${d.id}`)?.value; if(v) deliveries[d.id]=v; });
+        lista.forEach(d => { if (p.deliveries[d.id]) deliveries[d.id] = p.deliveries[d.id]; });
         const scope = {};
-        S.projects.forEach(pr => { scope[pr.id] = S.deliveries.filter(d=>document.getElementById(`sc-${pr.id}-${d.id}`)?.checked).map(d=>d.id); });
+        S.projects.forEach(pr => { scope[pr.id] = (p.scope[pr.id] || []).filter(x => lista.some(d => d.id === x)); });
+        const extras = {};
+        Object.entries(E.extras).forEach(([k, v]) => { extras[k] = { base: v.base }; });
         // Mantém a estrela de período principal (setDoc regrava o documento inteiro)
         const isPrimary = !!S.periods.find(x => x.id === id)?.isPrimary;
-        await savePeriod({ id, name, startDate, endDate, deliveries, scope, isPrimary });
-        S.currentPeriodId = id; closeModal(); scheduleDailySnapshot();
+        await savePeriod({ id, name, startDate: p.startDate, endDate: p.endDate, deliveries, scope, extras, isPrimary });
+        // Depois de salvar, o farol passa a mostrar o período salvo (sem isso ficava no anterior até trocar no seletor)
+        closeModal(); switchPeriod(id); scheduleDailySnapshot();
       };
       window._deletePeriod = async id => {
         if (!confirm('Excluir período?')) return;
@@ -689,12 +801,14 @@
       };
       window._setPrimary = async id => {
         const batch = writeBatch(db);
-        S.periods.forEach(p => {
-          batch.set(doc(db, C('periods'),p.id), { ...p, isPrimary: p.id === id });
+        S.periods.forEach(per => {
+          batch.set(doc(db, C('periods'),per.id), { ...per, isPrimary: per.id === id });
         });
         await batch.commit();
         closeModal();
       };
+
+      desenhar();
     }
 
     // ═══════════════════════════════════════════════════════
@@ -702,9 +816,9 @@
     // ═══════════════════════════════════════════════════════
     function showAdminModal(tab = 'projects') {
       // Contadores locais de ordem — evitam colisão quando o listener do
-      // Firestore ainda não refletiu o item recém-criado (S.projects/S.deliveries/S.groups desatualizados).
+      // Firestore ainda não refletiu o item recém-criado (S.projects/S.deliveriesBase/S.groups desatualizados).
       let nextProjOrder  = Math.max(...S.projects.map(p => p.order || 0), 0);
-      let nextDelOrder   = Math.max(...S.deliveries.map(d => d.order || 0), 0);
+      let nextDelOrder   = Math.max(...S.deliveriesBase.map(d => d.order || 0), 0);
       let nextGroupOrder = Math.max(...S.groups.map(g => g.order || 0), 0);
       let dragItem = null; // { kind: 'project'|'delivery'|'group', id }
       let editingProjId  = null;
@@ -720,7 +834,7 @@
             </div>
             <div class="flex bg-slate-100 m-4 p-1 rounded-xl gap-1">
               <button onclick="window._adminTab('projects')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='projects'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏗️ Obras (${S.projects.length})</button>
-              <button onclick="window._adminTab('deliveries')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='deliveries'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">📋 Entregas (${S.deliveries.length})</button>
+              <button onclick="window._adminTab('deliveries')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='deliveries'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">📋 Entregas (${S.deliveriesBase.length})</button>
               <button onclick="window._adminTab('groups')" class="flex-1 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${activeTab==='groups'?'tab-active text-slate-900':'text-slate-500 hover:text-slate-800'}">🏷️ Grupos (${S.groups.length})</button>
             </div>
             <div class="flex-1 overflow-y-auto px-4 pb-4">
@@ -767,7 +881,7 @@
                   <div class="mb-3">
                     <div class="mono text-[9px] font-bold uppercase tracking-widest text-${g.color}-600 px-1 mb-1.5">${g.name}</div>
                     <div class="space-y-1.5">
-                      ${S.deliveries.filter(d=>d.kr===g.name).map(d => d.id === editingDelId ? `
+                      ${S.deliveriesBase.filter(d=>d.kr===g.name).map(d => d.id === editingDelId ? `
                         <div class="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-xl">
                           <input id="edit-del-full-${d.id}" value="${d.full}" placeholder="Nome completo"
                             class="flex-1 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm outline-none focus:border-blue-500"
@@ -831,7 +945,7 @@
                       <span class="text-slate-300 cursor-grab select-none" title="Arrastar para reordenar">⠿</span>
                       <span class="w-4 h-4 rounded-full inline-block bg-${g.color}-500 border border-white shadow shrink-0"></span>
                       <span class="flex-1 text-sm font-medium text-slate-700">${g.name}</span>
-                      <span class="mono text-[10px] text-slate-400">${S.deliveries.filter(d=>d.kr===g.name).length} entrega(s)</span>
+                      <span class="mono text-[10px] text-slate-400">${S.deliveriesBase.filter(d=>d.kr===g.name).length} entrega(s)</span>
                       <button onclick="window._editGroup('${g.id}')" class="text-slate-300 hover:text-blue-500 transition-colors text-sm" title="Editar">✎</button>
                       <button onclick="window._removeGroup('${g.id}')" class="text-slate-300 hover:text-rose-500 transition-colors text-lg leading-none">×</button>
                     </div>
@@ -905,10 +1019,10 @@
       }
 
       async function reorderDeliveries(draggedId, targetId) {
-        const dragged = S.deliveries.find(d => d.id === draggedId);
-        const target  = S.deliveries.find(d => d.id === targetId);
+        const dragged = S.deliveriesBase.find(d => d.id === draggedId);
+        const target  = S.deliveriesBase.find(d => d.id === targetId);
         if (!dragged || !target || dragged.kr !== target.kr) return; // restrito ao mesmo grupo
-        const group = S.deliveries.filter(d => d.kr === dragged.kr);
+        const group = S.deliveriesBase.filter(d => d.kr === dragged.kr);
         const from = group.findIndex(d => d.id === draggedId);
         const to   = group.findIndex(d => d.id === targetId);
         const [item] = group.splice(from, 1);
@@ -916,9 +1030,9 @@
         // Reconstrói a lista completa preservando a ordem dos grupos (S.groups) com o
         // grupo reordenado substituído — funciona para qualquer quantidade de grupos.
         const merged = [];
-        S.groups.forEach(g => merged.push(...(g.name === dragged.kr ? group : S.deliveries.filter(d => d.kr === g.name))));
+        S.groups.forEach(g => merged.push(...(g.name === dragged.kr ? group : S.deliveriesBase.filter(d => d.kr === g.name))));
         const knownNames = new Set(S.groups.map(g => g.name));
-        merged.push(...S.deliveries.filter(d => !knownNames.has(d.kr)));
+        merged.push(...S.deliveriesBase.filter(d => !knownNames.has(d.kr)));
         const batch = writeBatch(db);
         merged.forEach((d, i) => batch.set(doc(db, C('deliveries'), d.id), { ...d, order: i + 1 }));
         await batch.commit();
@@ -930,7 +1044,7 @@
       window._removeDelivery = async id => { if(confirm('Remover entrega?')) { await removeDelivery(id); setModal(renderAdmin('deliveries')); attachAdminDragEvents('deliveries'); }};
       window._removeGroup = async id => {
         const group = S.groups.find(g => g.id === id);
-        const affected = S.deliveries.filter(d => d.kr === group.name).length;
+        const affected = S.deliveriesBase.filter(d => d.kr === group.name).length;
         if (affected > 0) { alert(`Não é possível remover: ${affected} entrega(s) usam o grupo "${group.name}". Edite essas entregas para outro grupo primeiro.`); return; }
         if (!confirm('Remover grupo?')) return;
         await removeGroup(id);
@@ -961,7 +1075,7 @@
         const name = document.getElementById(`edit-del-name-${id}`).value.trim();
         const kr   = document.getElementById(`edit-del-kr-${id}`).value;
         if (!full || !name) return;
-        const deliv = S.deliveries.find(d => d.id === id);
+        const deliv = S.deliveriesBase.find(d => d.id === id);
         await saveDelivery({ ...deliv, full, name, kr });
         editingDelId = null;
         setModal(renderAdmin('deliveries'));
@@ -975,7 +1089,7 @@
         const oldName = group.name;
         await saveGroup({ ...group, name, color });
         if (oldName !== name) {
-          const affected = S.deliveries.filter(d => d.kr === oldName);
+          const affected = S.deliveriesBase.filter(d => d.kr === oldName);
           if (affected.length) {
             const batch = writeBatch(db);
             affected.forEach(d => batch.set(doc(db, C('deliveries'), d.id), { ...d, kr: name }));
@@ -1125,6 +1239,7 @@
               'Clique em <strong>+ Período</strong>',
               'O escopo vem copiado do período anterior, e o nome e as datas já vêm sugeridos',
               'Os prazos de cada etapa vêm dos dias padrão: 05, 07, 12, 14, 15, 18 e 20. Ajuste o que fugir disso',
+              'Para obras com outro calendário, clique no <strong>+</strong> da etapa, informe o 2º prazo e marque na grade as obras desse prazo. A etapa vira duas colunas na matriz',
               'Marque ou desmarque o escopo. Dá para clicar e arrastar sobre várias células, e clicar no nome da obra ou da etapa para marcar a linha ou a coluna',
               'Clique em <strong>Salvar período</strong>',
             ])}
@@ -1320,7 +1435,7 @@
           ${types.map(t => renderSection(t)).join('')}
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
-            <span>Farol de MFO · Trinus .co · v1.2 · 28/10/2026</span>
+            <span>Farol de MFO · Trinus .co · v1.3 · 28/10/2026</span>
           </footer>
         </div>
       `;
@@ -1471,7 +1586,7 @@
       let meta = 0, ok = 0, warn = 0, late = 0;
       const obras = projects.map(p => {
         let m = 0, o = 0, w = 0, l = 0;
-        S.deliveries.forEach(d => {
+        entregasDe(period).forEach(d => {
           const s = statusIn(period, p.id, d.id);
           if (s === 'na') return;
           m++;
@@ -1496,7 +1611,7 @@
           else if (s === 'delivered_warn') warn++;
           else if (s === 'late') late++;
         });
-        return { d, kr: d.kr, color: group.color, full: d.full, meta, ok, warn, late, pct: meta ? Math.round((ok + warn) / meta * 100) : 0 };
+        return { d, kr: d.kr, color: group.color, full: nomeEtapa(d), meta, ok, warn, late, pct: meta ? Math.round((ok + warn) / meta * 100) : 0 };
       }));
     }
 
@@ -1616,7 +1731,7 @@
 
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${projects.length} · Etapas: ${S.deliveries.length}</span>
-            <span>Farol de MFO · Trinus .co · v1.2 · 28/10/2026</span>
+            <span>Farol de MFO · Trinus .co · v1.3 · 28/10/2026</span>
           </footer>
         </div>
       `;
@@ -1786,7 +1901,7 @@
       const proj = S.projects.find(p => p.id === pId), deliv = S.deliveries.find(d => d.id === dId);
       await addDoc(collection(db, C('history')), {
         periodId: S.currentPeriodId, projectId: pId, projectName: proj?.name || pId,
-        deliveryId: dId, deliveryName: deliv?.name || dId, action, changedAt: Date.now(),
+        deliveryId: dId, deliveryName: (deliv?.name || dId) + (deliv?.virtual ? ' (2º prazo)' : ''), action, changedAt: Date.now(),
       });
     }
 
@@ -1825,7 +1940,7 @@
             <div class="flex items-start justify-between px-6 py-4 border-b border-slate-100 gap-4">
               <div class="min-w-0">
                 <div class="mono text-[10px] font-bold uppercase tracking-widest text-accent">Acompanhamento da etapa</div>
-                <h2 class="text-lg font-bold text-slate-900 truncate">${esc(deliv?.full || '')}</h2>
+                <h2 class="text-lg font-bold text-slate-900 truncate">${esc(deliv ? nomeEtapa(deliv) : '')}</h2>
                 <p class="text-xs text-slate-400 truncate">${esc(proj?.name || '')} · ${esc(S.period.name)}</p>
               </div>
               <button onclick="closeModal()" class="text-slate-400 hover:text-slate-600 text-xl leading-none p-1">✕</button>
@@ -2037,7 +2152,7 @@
             const dl = S.period.deliveries?.[d.id];
             const vencido = dl && new Date(dl + 'T23:59:59') < agora;
             texto(d.name, xCel(i + k) + cellW / 2, y + 36, F(700, 11), '#1e293b', 'center');
-            if (dl) texto(fmtDate(dl), xCel(i + k) + cellW / 2, y + 53, F(vencido ? 700 : 400, 9, true), vencido ? '#e11d48' : fort, 'center');
+            if (dl) texto((temBlocos(d) ? ordemBloco(d) + 'º · ' : '') + fmtDate(dl), xCel(i + k) + cellW / 2, y + 53, F(vencido ? 700 : 400, 9, true), vencido ? '#e11d48' : fort, 'center');
           });
           i += items.length;
         });
@@ -2124,10 +2239,10 @@
                       const dl = S.period?.deliveries?.[d.id];
                       const past = dl && new Date(dl+'T23:59:59') < new Date();
                       const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
-                      return `<th class="p-1.5 border-b border-r border-${color}-200 min-w-[65px] text-center bg-${color}-100/40 ${boundary?'border-l-2 border-l-slate-300':''}" title="${d.full}">
+                      return `<th class="p-1.5 border-b border-r border-${color}-200 min-w-[65px] text-center bg-${color}-100/40 ${boundary?'border-l-2 border-l-slate-300':''}" title="${esc(nomeEtapa(d))}"${d.virtual ? ' style="border-left:2px dashed #94a3b8"' : ''}>
                         <div class="mono text-[9px] font-bold text-${color}-700 mb-0.5">${d.kr}</div>
                         <div class="text-[11px] font-bold text-${color}-950 leading-tight">${d.name}</div>
-                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':`text-${color}-400`}">${fmtDate(dl)}</div>`:''}
+                        ${dl?`<div class="mono text-[9px] mt-0.5 ${past?'text-rose-500 font-bold':`text-${color}-400`}">${temBlocos(d) ? ordemBloco(d) + 'º · ' : ''}${fmtDate(dl)}</div>`:''}
                       </th>`;
                     }).join('')}
                   </tr>
@@ -2142,7 +2257,7 @@
                       ${flatDeliveries.map(({d, color}, di) => {
                         const s = getStatus(proj.id,d.id);
                         const boundary = di > 0 && flatDeliveries[di-1].d.kr !== d.kr;
-                        return `<td class="p-1 border-b border-r border-slate-100 text-center ${boundary?'border-l-2 border-l-slate-200':''} bg-${color}-50/5">
+                        return `<td class="p-1 border-b border-r border-slate-100 text-center ${boundary?'border-l-2 border-l-slate-200':''} bg-${color}-50/5"${d.virtual ? ' style="border-left:2px dashed #cbd5e1"' : ''}>
                           <div class="cell relative ${s==='na'?'cell-na':''} w-full py-1.5 rounded-md border mono text-[11px] font-bold shadow-sm transition-colors duration-150 ${S.isEditor&&s!=='na'?'hover:scale-105 active:scale-95':''} ${cellStyle(s)}"
                             data-pid="${proj.id}" data-did="${d.id}" title="${esc(cellTitle(proj.id, d.id, s))}">
                             ${cellHtml(proj.id, d.id, s)}
