@@ -1320,7 +1320,7 @@
           ${types.map(t => renderSection(t)).join('')}
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${S.projects.filter(p=>S.sectorFilter==='All'||p.type===S.sectorFilter).length} · Entregas: ${S.deliveries.length}</span>
-            <span>Farol de MFO · Trinus .co · v1</span>
+            <span>Farol de MFO · Trinus .co · v1.2 · 28/10/2026</span>
           </footer>
         </div>
       `;
@@ -1616,7 +1616,7 @@
 
           <footer class="flex items-center justify-between text-slate-400 mono text-[10px] uppercase tracking-widest px-2">
             <span>Obras: ${projects.length} · Etapas: ${S.deliveries.length}</span>
-            <span>Farol de MFO · Trinus .co · v1</span>
+            <span>Farol de MFO · Trinus .co · v1.2 · 28/10/2026</span>
           </footer>
         </div>
       `;
@@ -1628,12 +1628,31 @@
     function esc(s) {
       return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
     }
-    // Só aceita endereço http ou https (bloqueia javascript: e similares)
+    // Remove aspas e espaços em volta (o "Copiar como caminho" do Windows põe aspas)
+    const limparLink = u => String(u || '').trim().replace(/^["'“”‘’<]+|["'“”‘’>]+$/g, '').trim();
+    // Caminho de pasta do computador ou de rede, que não funciona como link
+    const ehCaminhoLocal = s => /^[a-z]:[\\/]/i.test(s) || s.startsWith('\\\\') || /^file:/i.test(s);
+    // Só aceita endereço http ou https de um site de verdade (bloqueia javascript:, caminhos locais e similares)
     function safeUrl(u) {
+      const s = limparLink(u);
+      if (!s || ehCaminhoLocal(s)) return null;
       try {
-        const x = new URL(/^https?:\/\//i.test(u) ? u : 'https://' + u);
-        return (x.protocol === 'https:' || x.protocol === 'http:') ? x.href : null;
+        const x = new URL(/^https?:\/\//i.test(s) ? s : 'https://' + s);
+        if (x.protocol !== 'https:' && x.protocol !== 'http:') return null;
+        return x.hostname.includes('.') ? x.href : null;
       } catch { return null; }
+    }
+    function avisoLinkInvalido(raw) {
+      return ehCaminhoLocal(limparLink(raw))
+        ? 'Isso parece um caminho de pasta do computador. Cole o link do SharePoint ou do OneDrive, que começa com https://.'
+        : 'Endereço inválido. Cole o link completo da planilha, começando com https://.';
+    }
+    function toast(msg) {
+      const t = document.createElement('div');
+      t.textContent = msg;
+      t.className = 'fixed bottom-5 right-5 z-[400] bg-slate-900 text-white text-xs font-semibold px-4 py-3 rounded-xl shadow-2xl fade-in';
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 2400);
     }
     function renderMfoLinkCell(p) {
       const url = p.mfoLink ? safeUrl(p.mfoLink) : null;
@@ -1669,12 +1688,12 @@
               <input id="link-input" type="text" value="${esc(proj.mfoLink || '')}" placeholder="Cole o link do SharePoint ou do Drive"
                 class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none text-sm focus:border-blue-500 focus:ring-4 focus:ring-blue-50 transition-all mb-1"
                 onkeydown="if(event.key==='Enter') window._saveLink('${esc(proj.id)}')">
-              <p id="link-err" class="mono text-[10px] font-bold text-rose-500 uppercase tracking-wider hidden mb-2">Endereço inválido. Use um link http ou https.</p>
+              <p id="link-err" class="hidden text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2 mt-2"></p>
               <div class="flex items-center justify-between gap-2 mt-4">
                 ${proj.mfoLink ? `<button onclick="window._removeLink('${esc(proj.id)}')" class="text-xs text-rose-500 hover:text-rose-700 font-medium">Remover link</button>` : '<span></span>'}
                 <div class="flex gap-2">
                   <button onclick="closeModal()" class="px-4 py-2.5 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 uppercase tracking-wider">Cancelar</button>
-                  <button onclick="window._saveLink('${esc(proj.id)}')" class="px-4 py-2.5 bg-slate-900 hover:bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-colors">Salvar</button>
+                  <button id="link-salvar" onclick="window._saveLink('${esc(proj.id)}')" class="px-4 py-2.5 bg-slate-900 hover:bg-blue-600 text-white rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-colors">Salvar</button>
                 </div>
               </div>
             </div>
@@ -1682,20 +1701,36 @@
         </div>
       `);
       setTimeout(() => document.getElementById('link-input')?.focus(), 50);
+      const erro = msg => { const e = document.getElementById('link-err'); if (e) { e.textContent = msg; e.classList.remove('hidden'); } };
+      const salvando = on => {
+        const b = document.getElementById('link-salvar');
+        if (b) { b.disabled = on; b.textContent = on ? 'Salvando…' : 'Salvar'; b.classList.toggle('opacity-60', on); }
+      };
+      // Grava e só fecha a janela depois de o banco confirmar; qualquer falha aparece na tela
+      const gravar = async (p, mfoLink, aviso) => {
+        salvando(true);
+        try {
+          const limite = new Promise((_, rej) => setTimeout(() => rej(new Error('sem resposta do servidor em 10 segundos')), 10000));
+          await Promise.race([saveProject({ ...p, mfoLink }), limite]);
+          closeModal();
+          toast(aviso);
+        } catch (e) {
+          salvando(false);
+          erro('Não foi possível salvar o link: ' + (e?.message || e) + '. Confira a conexão e tente de novo.');
+        }
+      };
       window._saveLink = async id => {
         const p = S.projects.find(x => x.id === id);
-        const raw = document.getElementById('link-input').value.trim();
+        const raw = document.getElementById('link-input').value;
         if (!p) return;
-        if (!raw) { await saveProject({ ...p, mfoLink: '' }); closeModal(); return; }
+        if (!limparLink(raw)) { await gravar(p, '', 'Link removido'); return; }
         const url = safeUrl(raw);
-        if (!url) { document.getElementById('link-err').classList.remove('hidden'); return; }
-        await saveProject({ ...p, mfoLink: url });
-        closeModal();
+        if (!url) { erro(avisoLinkInvalido(raw)); return; }
+        await gravar(p, url, 'Link salvo ✓');
       };
       window._removeLink = async id => {
         const p = S.projects.find(x => x.id === id);
-        if (p) await saveProject({ ...p, mfoLink: '' });
-        closeModal();
+        if (p) await gravar(p, '', 'Link removido');
       };
     }
 
